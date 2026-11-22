@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>socket.io-golang chat</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+    #log { list-style: none; padding: 0; min-height: 12rem; }
+    #log li.note { color: #666; font-style: italic; }
+    form { display: flex; gap: .5rem; }
+    input { flex: 1; padding: .5rem; font: inherit; }
+    button { padding: .5rem 1rem; font: inherit; }
+  </style>
+</head>
+<body>
+  <h1>Lobby</h1>
+  <ul id="log" aria-live="polite"></ul>
+  <form id="form">
+    <label for="text" hidden>Message</label>
+    <input id="text" autocomplete="off" maxlength="500" placeholder="Say something" required>
+    <button>Send</button>
+  </form>
+
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.8.3/dist/socket.io.min.js"
+          integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"
+          crossorigin="anonymous"></script>
+  <script>
+    const log = document.getElementById("log");
+    const form = document.getElementById("form");
+    const text = document.getElementById("text");
+
+    function add(line, note) {
+      const item = document.createElement("li");
+      item.textContent = line;
+      if (note) item.className = "note";
+      log.append(item);
+    }
+
+    const name = (prompt("Your name") || "").trim() || "guest";
+    const socket = io({ auth: { name } });
+
+    socket.on("connect", () => add(`connected as ${name}`, true));
+    socket.on("connect_error", (error) => add(`refused: ${error.message}`, true));
+    socket.on("disconnect", (reason) => add(`disconnected: ${reason}`, true));
+    socket.on("joined", (who) => add(`${who} joined`, true));
+    socket.on("left", (who) => add(`${who} left`, true));
+    socket.on("message", ({ from, text }) => add(`${from}: ${text}`));
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      socket.emit("message", text.value, (error) => {
+        if (error) add(error, true);
+      });
+      text.value = "";
+    });
+  </script>
+</body>
+</html>

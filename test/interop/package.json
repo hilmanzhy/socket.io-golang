@@ -1,0 +1,9 @@
+{
+  "name": "socket.io-golang-interop",
+  "private": true,
+  "type": "module",
+  "description": "Drives socket.io-golang with the official JavaScript client.",
+  "dependencies": {
+    "socket.io-client": "4.8.3"
+  }
+}
