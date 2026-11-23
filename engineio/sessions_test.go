@@ -128,6 +128,10 @@ func TestMaxSessionsFreedWhenSessionEnds(t *testing.T) {
 	}
 }
 
+// TestMaxSessionsConcurrentHandshakes checks that handshakes racing for the
+// last slots are granted exactly MaxSessions times. The 101 answer of a
+// WebSocket handshake leaves the server before accept runs, so the test waits
+// for the accepts of the granted handshakes before it counts them.
 func TestMaxSessionsConcurrentHandshakes(t *testing.T) {
 	t.Parallel()
 	const limit, attempts = 5, 40
@@ -175,8 +179,9 @@ func TestMaxSessionsConcurrentHandshakes(t *testing.T) {
 				}
 			}
 			if granted != limit || refused != attempts-limit {
-				t.Errorf("%d handshakes granted and %d refused, want %d and %d", granted, refused, limit, attempts-limit)
+				t.Fatalf("%d handshakes granted and %d refused, want %d and %d", granted, refused, limit, attempts-limit)
 			}
+			eventually(t, "accept of every granted handshake", func() bool { return h.accepts.Load() >= limit })
 			if n := h.accepts.Load(); n != limit {
 				t.Errorf("accept called %d times, want %d", n, limit)
 			}
