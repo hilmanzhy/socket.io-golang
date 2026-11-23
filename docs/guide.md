@@ -4,7 +4,7 @@ This guide shows how to build with the library, one task at a time. It is an uno
 
 Conventions used in the snippets:
 
-- `socketio` stands for `socketio "github.com/nuriontech/socket.io-golang"`.
+- `socketio` stands for `socketio "github.com/hilmanzhy/socket.io-golang"`.
 - `engineio`, `parser` and `redisadapter` stand for the packages of the same names under that module path.
 - Each snippet is a set of top-level declarations. Add the standard-library imports it uses.
 - The JavaScript lines assume `socket.io-client` 3.x or 4.x.
@@ -74,36 +74,41 @@ Requests the Engine.IO layer refuses are answered with a JSON body `{"code":N,"m
 | 400 | 2 | Bad handshake method | A handshake that is not a GET |
 | 400 | 3 | Bad request | An unsupported polling method, a polling POST that cannot be read or decoded, a second overlapping polling request of the same kind, a polling request for a session that already moved to WebSocket, or a WebSocket upgrade that the session cannot accept |
 | 413 | 3 | Bad request | A polling POST body larger than `MaxPayload` |
-| 403 | 4 | Forbidden | The origin check or `AllowRequest` refused the request |
+| 403 | 4 | Forbidden | The origin check or `AllowRequest` refused the request, or panicked (a panic counts as a refusal) |
+| 503 | 4 | Forbidden | A handshake would take the server over `MaxSessions` |
 | 400 | 5 | Unsupported protocol version | `EIO` is not `4` (Engine.IO v3 clients land here) |
 
-The checks run in this order: origin (403), preflight (204, see [CORS and origins](#cors-and-origins)), `EIO`, `transport`, then the session. One refusal does not use the JSON body: a request for the WebSocket transport that is not a valid WebSocket upgrade (a missing `Upgrade` or `Connection` header, a wrong version or key) is answered by `gorilla/websocket` with HTTP 400 (405 when the method is not GET) and a plain-text body.
+The checks run in this order: origin (403), preflight (204, see [CORS and origins](#cors-and-origins)), `EIO`, `transport`, then the session. A handshake then goes through the method check (400, code 2), `AllowRequest` (403) and `MaxSessions` (503), in that order. One refusal does not use the JSON body: a request for the WebSocket transport that is not a valid WebSocket upgrade (a missing `Upgrade` or `Connection` header, a wrong version or key) is answered by `gorilla/websocket` with HTTP 400 (405 when the method is not GET) and a plain-text body.
 
 ## Options
 
-`socketio.Options`. A zero field means its default.
+`socketio.Options`. A zero field means its default, and so does a negative number or duration, except for `MaxRooms`, where zero or a negative value means no limit.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `Engine` | `engineio.Options` | zero value (see the next table) | The transport layer |
-| `ConnectTimeout` | `time.Duration` | 45 s | How long a connection may stay open without joining a namespace |
+| `ConnectTimeout` | `time.Duration` | 45 s | How long a connection may stay open without a connected namespace |
 | `MaxAttachments` | `int` | 10 | Maximum binary attachments in one received packet |
+| `MaxArguments` | `int` | 64 | Maximum elements of one received event or acknowledgement; the event name counts as one, so an event takes 63 arguments by default. It can be raised but not turned off: zero or a negative value means 64. See [Limits and backpressure](#limits-and-backpressure) |
+| `MaxRooms` | `int` | 0: no limit | Maximum rooms one socket may be in, not counting the room named after its ID. Zero or negative means no limit |
 | `EventBacklog` | `int` | 64 | Received events one socket may have waiting for its handlers before its connection stops being read |
 | `Adapter` | `socketio.Adapter` | nil, a single server | Relays broadcasts to the other servers of a cluster |
-| `Logger` | `*slog.Logger` | `slog.Default()` | Receives the panics of handlers |
+| `Logger` | `*slog.Logger` | `slog.Default()` | Receives the panics of handlers and, unless `Engine.Logger` is set, the panics of `CheckOrigin` and `AllowRequest`; also receives the warning for a Socket.IO packet that ends its connection as malformed, and the warning for a join from another server that hit `MaxRooms` |
 
-`engineio.Options`. A zero field means its default.
+`engineio.Options`. A zero field means its default, and so does a negative duration or size.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `PingInterval` | `time.Duration` | 25 s | Pause between two heartbeats |
 | `PingTimeout` | `time.Duration` | 20 s | How long a client may take to answer a ping, to accept a write, or to collect its last packets on close |
 | `UpgradeTimeout` | `time.Duration` | 10 s | Bound on the switch from polling to WebSocket |
-| `MaxPayload` | `int64` | 1,000,000 bytes | Cap on one polling request body and on one WebSocket message |
+| `MaxPayload` | `int64` | 1,000,000 bytes | Cap on one polling request body and on one WebSocket message; also bounds one polling response body (see [Limits and backpressure](#limits-and-backpressure)) |
 | `MaxBuffer` | `int64` | 16 MiB (16,777,216 bytes) | Cap on the bytes queued for a client that is not reading |
+| `MaxSessions` | `int` | 0: no limit | Cap on the sessions open at the same time; a handshake over it is answered with HTTP 503. Zero or negative means no limit. The cap is global: one client may open sessions until it is reached, so pair it with a limit per client in `AllowRequest` |
 | `Transports` | `[]engineio.Transport` | `engineio.Polling` and `engineio.WebSocket` | Enabled transports |
-| `CheckOrigin` | `func(*http.Request) bool` | nil: every cross-origin request is rejected | Decides whether a cross-origin request is served. See [CORS and origins](#cors-and-origins) |
-| `AllowRequest` | `func(*http.Request) error` | nil: every handshake is allowed | Can refuse a handshake before a session exists. A non-nil error answers 403 |
+| `CheckOrigin` | `func(*http.Request) bool` | nil: every cross-origin request is rejected | Decides whether a cross-origin request is served. See [CORS and origins](#cors-and-origins). A panic is recovered, logged to `Logger` and counts as a refusal |
+| `AllowRequest` | `func(*http.Request) error` | nil: every handshake is allowed | Can refuse a handshake before a session exists. A non-nil error answers 403. A panic is recovered, logged to `Logger` and refuses the handshake the same way |
+| `Logger` | `*slog.Logger` | nil: `slog.Default()` | Receives the panics of `CheckOrigin` and `AllowRequest`. A server built with `socketio.New` fills it with `socketio.Options.Logger` when it is nil |
 
 The handshake tells the client the effective `PingInterval`, `PingTimeout` and `MaxPayload` (in milliseconds and bytes), so the client adapts to what you configure.
 
@@ -142,15 +147,20 @@ func rateLimited(allow func(*http.Request) bool) socketio.Options {
 
 | Limit | What happens when it is exceeded |
 |---|---|
-| `MaxPayload` | A polling POST body over the limit is answered with HTTP 413 and the session ends with `ReasonTransportError`. A WebSocket message over the limit closes the connection and nothing of it is delivered |
+| `MaxPayload` | A polling POST body over the limit is answered with HTTP 413 and the session ends with `ReasonTransportError`. A WebSocket message over the limit closes the connection and nothing of it is delivered. A polling response is never filled past it: see below |
 | `MaxAttachments` | A packet that announces more attachments than the limit is a protocol violation: the connection ends with `ReasonParseError` |
+| `MaxArguments` | On by default (64) and not switchable off. An event or acknowledgement with more elements than the limit (the event name counts as one) is a protocol violation, refused before its arguments are parsed: the connection ends with `ReasonParseError`. See below |
+| `MaxSessions` | Off by default. A handshake that would take the server over the limit is answered with HTTP 503, code 4, and creates no session. A session holds its slot until it has closed. The cap is global, so one client can fill it: pair it with a limit per client in `AllowRequest` |
+| `MaxRooms` | Off by default. A `Join` that would take a socket over the limit joins none of the rooms of that call and returns `ErrRoomLimit`. The room named after the socket's ID never counts; see [Rooms](#rooms) |
 | `EventBacklog` | See below |
 | `MaxBuffer` | See below |
 | `ConnectTimeout` | See below |
 | `PingInterval` and `PingTimeout` | The server sends a ping, and the next one follows `PingInterval` after the client's answer. A client that has not answered `PingTimeout` after a ping is closed with `ReasonPingTimeout` |
 | `UpgradeTimeout` | If the polling to WebSocket probe does not complete in time, the upgrade is abandoned and the session keeps working over polling |
 
-**EventBacklog.** Each socket runs its handlers one at a time. Events that arrive while a handler is busy wait in a queue of at most `EventBacklog` entries. When the queue is full, the server stops reading the whole connection (every namespace of that client, including its heartbeat answers) until a handler finishes and frees a slot. This slows a client that sends faster than its handlers work, at the price that a handler that never returns freezes its connection until the ping timeout ends it. The connect handler and the disconnect handler are queued without waiting, even when the backlog is full; while they wait they count towards it.
+**MaxArguments.** The cap counts the event name, so with the default 64 an event takes at most 63 arguments, and an acknowledgement, which has no name, at most 64. A packet over the cap ends the connection with `ReasonParseError` (the parser reports "too many arguments", which wraps `parser.ErrMalformed`). `Options.MaxArguments` raises the cap; zero or a negative value means the default, so the cap cannot be turned off. The Node.js server has no such cap (`socket.io-parser` 4.2.7 limits only the attachments), so an application whose clients send more than 63 arguments in one event must raise it.
+
+**EventBacklog.** Each socket runs its handlers one at a time. Events that arrive while a handler is busy wait in a queue of at most `EventBacklog` entries. When the queue is full, the server stops reading the whole connection (every namespace of that client, including its heartbeat answers) until a handler finishes and frees a slot. This slows a client that sends faster than its handlers work, at the price that a handler that never returns freezes its connection until the ping timeout ends it. The connect handler and the disconnect handler are queued without waiting, even when the backlog is full; while they wait they count towards it. The disconnect handler is the last task of the socket: no handler of the socket runs after it. The events queued before it still run first, and an event that was waiting for room in a full backlog at that moment is dropped.
 
 Two consequences follow from reading stopping:
 
@@ -159,15 +169,17 @@ Two consequences follow from reading stopping:
 
 The release is covered by a test (`TestFullBacklogDoesNotKeepTheSocketOfAnEndedConnection` in `handler_test.go`). It was not measured against the JavaScript client.
 
-**Memory held for one client.** While its handlers stall, one socket can hold `EventBacklog` + 2 received events: one in the running handler, `EventBacklog` waiting, and one that the reader holds while it waits for a slot. One event can be as large as one text message plus `MaxAttachments` binary messages, each up to `MaxPayload`. The bytes received and held for one socket can therefore reach about (`EventBacklog` + 2) x (1 + `MaxAttachments`) x `MaxPayload`, which is about 726 MB with the defaults (66 x 11 x 1,000,000 bytes). Memory can exceed the bytes received: every argument of an event is kept as a separate value, and the number of arguments is not capped, so an event made of very many tiny arguments costs many times its size. Measured on the parser alone (Go 1.27.1, darwin/arm64), 70 events of 1,000,000 bytes, each with about 500,000 one-digit arguments, kept about 1.2 GB of heap, 17 times their size, and about 2.0 GB, 29 times, when each event also carried a one-byte attachment. A client has one socket per namespace it joined. If your handlers can block, size `MaxPayload`, `MaxAttachments` and `EventBacklog` to what your traffic needs.
+**Memory held for one client.** While its handlers stall, one socket can hold `EventBacklog` + 2 received events: one in the running handler, `EventBacklog` waiting, and one that the reader holds while it waits for a slot. One event can be as large as one text message plus `MaxAttachments` binary messages, each up to `MaxPayload`. The bytes received and held for one socket can therefore reach about (`EventBacklog` + 2) x (1 + `MaxAttachments`) x `MaxPayload`, which is about 726 MB with the defaults (66 x 11 x 1,000,000 bytes). Memory can exceed the bytes received: every argument of an event is kept as a separate value, so an event made of many tiny arguments costs more than its size. `MaxArguments` bounds how many arguments one event or acknowledgement can have, 64 by default with the event name counted as one: a packet over the cap is refused before its arguments are parsed, and the connection ends with `ReasonParseError`. Within the cap, decoding a text message of about 1 MB allocated about 1.0 times its size plus about 10 KB, whether it held 63 strings of 16 KB or one argument that is an array of 500,000 numbers. That is one throwaway run on one machine (Go 1.27.1, Apple arm64), not a benchmark kept in the repository, and it does not cover binary attachments. A client has one socket per namespace it joined. If your handlers can block, size `MaxPayload`, `MaxAttachments`, `MaxArguments` and `EventBacklog` to what your traffic needs.
 
 **MaxBuffer.** Every message sent to a client is queued until the client's transport takes it. The check applies when something is already queued: if the queue holds bytes and the next message would push the total over `MaxBuffer`, the session is closed with `ReasonTransportError`. A single message larger than `MaxBuffer` is accepted into an empty queue. The queue counts the bytes of message data, not the packet type prefixes. A direct `Socket.Emit` to such a session returns `ErrDisconnected`. A broadcast does not report the failure of one recipient: the slow client is closed and the broadcast carries on.
 
-**ConnectTimeout.** The timer starts when the connection opens. The first successful connection to a namespace stops it for good. If it fires while the connection has no connected socket, the connection is closed. A namespace that refuses the client does not stop the timer.
+**Polling responses.** A polling response carries as many queued packets as fit in `MaxPayload`, and at least one; the rest wait for the next poll. A binary packet counts at its base64 size, and the separator between packets counts too. A single packet larger than `MaxPayload` is therefore sent alone. `engine.io` 6.6.12, the Node.js server of the pinned test versions, answers a poll with everything that is queued.
+
+**ConnectTimeout.** The timer runs exactly while the connection is open and has no connected socket. It starts when the connection opens and the first successful connection to a namespace stops it. It starts again, for the full `ConnectTimeout`, when the client leaves its last namespace while the connection stays open. If it fires, the connection is closed. A namespace that refuses the client does not stop the timer. This server restarts the timer on purpose; `socket.io` 4.8.3 arms its timer once, when the connection is set up.
 
 ## Namespaces
 
-`Server.Of(name)` returns the namespace with that name and creates it on first use. A missing leading `/` is added. Clients can connect only to namespaces that exist: a CONNECT for an unknown namespace is answered with a connect error whose message is `Invalid namespace`.
+`Server.Of(name)` returns the namespace with that name and creates it on first use. A missing leading `/` is added. Clients can connect only to namespaces that exist: a CONNECT for an unknown namespace is answered with a connect error whose message is `Invalid namespace`. A name that contains a comma is accepted, but no client can reach it, because the packet format ends the namespace at the first comma.
 
 ```go
 func namespaces(server *socketio.Server) {
@@ -188,7 +200,7 @@ JavaScript: `io("http://localhost:3000/chat")`.
 
 ## Middleware and handshake auth
 
-`Namespace.Use` adds a middleware that runs for every connecting socket, in the order added, before the socket is connected. The socket can be inspected, but it cannot emit or join rooms yet: `Emit` returns `ErrDisconnected` and `Join` has no effect. Put room joins and first emits in the [connect handler](#the-connect-handler).
+`Namespace.Use` adds a middleware that runs for every connecting socket, in the order added, before the socket is connected. The socket can be inspected, but it cannot emit or join rooms yet: `Emit` returns `ErrDisconnected` and `Join` has no effect (it returns nil). Put room joins and first emits in the [connect handler](#the-connect-handler).
 
 A non-nil error refuses the connection. The client receives a connect error with the error's message. Return a `*socketio.ConnectError` to attach data. The first error stops the chain.
 
@@ -309,6 +321,8 @@ func inspect(socket *socketio.Socket) {
 }
 ```
 
+A received event carries at most `Options.MaxArguments` elements (64 by default), the event name counting as one, so 63 arguments with the default. An acknowledgement the client sends has no name and can carry 64 arguments. A packet over the cap is refused as malformed before its arguments are parsed, and the connection ends with `ReasonParseError`. The Node.js server has no such cap: an application whose clients send more than 63 arguments in one event must raise `Options.MaxArguments` (see [Limits and backpressure](#limits-and-backpressure)).
+
 `Socket.Use` adds a middleware that sees every received event before its handler. A non-nil error drops the event, without an acknowledgement.
 
 ```go
@@ -326,7 +340,7 @@ Reserved event names are `connect`, `connect_error`, `disconnect`, `disconnectin
 
 ## Acknowledgements
 
-Client to server: when the client calls `emit` with a callback, `Event.WantsAck()` is true and `Event.Ack(args...)` sends the answer. `Ack` does nothing and returns nil when the client did not ask. Only one answer is sent: the first call whose arguments can be encoded claims it, and later calls do nothing and return nil. If your handler never calls `Ack`, the client's callback never runs.
+Client to server: when the client calls `emit` with a callback, `Event.WantsAck()` is true and `Event.Ack(args...)` sends the answer. `Ack` does nothing and returns nil when the client did not ask. Only one answer is sent: the first call that hands it over for sending claims it, and later calls do nothing and return nil. A call that fails, because its arguments cannot be encoded or because the socket is disconnected, returns the error and claims nothing, so a later call may still answer. If your handler never calls `Ack`, the client's callback never runs.
 
 Server to client: `Socket.EmitWithAck(ctx, event, args...)` sends an event and waits for the client's answer. It returns the answer's `Args`, `ErrDisconnected` if the socket disconnects first, or the context's error.
 
@@ -422,18 +436,23 @@ Rules and cautions:
 
 ## Rooms
 
-A room is a name. A socket can be in any number of rooms of its namespace. Every socket is automatically in a room named after its own `ID()`.
+A room is a name. A socket can be in any number of rooms of its namespace, unless you set `Options.MaxRooms`. Every socket is automatically in a room named after its own `ID()`.
 
 ```go
 func rooms(socket *socketio.Socket) {
-	socket.Join("lobby", "news")
+	if err := socket.Join("lobby", "news"); err != nil {
+		log.Printf("join: %v", err)
+		return
+	}
 	socket.Leave("news")
 	log.Println(socket.Rooms())
 }
 ```
 
+- `Socket.Join(rooms ...string) error` returns nil unless `Options.MaxRooms` is set. The other samples in this guide ignore its result, which is safe while `MaxRooms` is zero.
+- `Options.MaxRooms` is off by default. The room named after the socket's ID never counts toward it, so a socket can be in `MaxRooms` rooms besides its own, and joining its own room never fails. A `Join` that would take the socket over the cap joins none of the rooms of that call and returns `socketio.ErrRoomLimit`: it is all or nothing per call. A room the socket is already in is skipped and does not count again, so a call that names only such rooms succeeds at the cap.
 - `Socket.Rooms()` returns the rooms the socket is in, sorted, including the room named after its ID.
-- `Join` has no effect on a socket that is not connected, for example inside a namespace middleware.
+- `Join` has no effect on a socket that is not connected, for example inside a namespace middleware, and returns nil.
 - A socket leaves all its rooms when it disconnects.
 - To address one socket by ID, use its room: `server.To(id).Emit(...)`.
 - Never pass a room name chosen by the client to `To` or `Join` without checking it. Socket IDs are room names, so an unchecked name lets a client send to a room it never joined or straight to another socket, and an unchecked `Join` lets it listen to any room. The `message` handler in [Receiving events](#receiving-events) checks `socket.Rooms()` first.
@@ -464,7 +483,9 @@ func broadcasts(server *socketio.Server, socket *socketio.Socket) error {
 	socket.To("lobby").Emit("typing", socket.ID())
 	socket.Broadcast().Emit("joined", socket.ID())
 
-	server.To("lobby").Join("announcements")
+	if err := server.To("lobby").Join("announcements"); err != nil {
+		log.Printf("join: %v", err)
+	}
 	server.To("lobby").Leave("announcements")
 	for _, member := range server.To("lobby").Sockets() {
 		log.Println(member.ID())
@@ -477,7 +498,8 @@ How a broadcast runs:
 
 - The packet is encoded once and shared by all recipients.
 - The operation is applied to the sockets of this server first, then published to the adapter.
-- The returned error concerns only the encoding of the event (a reserved name, a value `encoding/json` cannot encode) or the publication to the adapter. Delivery to individual sockets is not reported.
+- The returned error concerns only the encoding of the event (a reserved name, a value `encoding/json` cannot encode), the publication to the adapter, and, for `Join`, `Options.MaxRooms`. Delivery to individual sockets is not reported.
+- `BroadcastOperator.Join` skips a socket that the cap would be exceeded for and joins the others. On this server the returned error then wraps `ErrRoomLimit` (use `errors.Is`), and it is joined with the adapter's error if the publication failed too. On the other servers of the cluster the socket is skipped the same way and a warning is logged through their `Options.Logger`; the caller is not told.
 - With no adapter, `Local` makes no difference.
 
 ## Per-socket data
@@ -510,7 +532,7 @@ func disconnecting(socket *socketio.Socket) {
 - `Disconnect(false)` removes the socket from its namespace and sends the client a DISCONNECT packet for that namespace. The other namespaces of the client stay connected. The JavaScript client reports the reason `io server disconnect`.
 - `Disconnect(true)` does that for every namespace of the client and then closes the underlying connection.
 - `BroadcastOperator.Disconnect(closeConnection)` does the same for every matching socket.
-- `Socket.OnDisconnect(handler)` sets a handler that runs once, with a `socketio.Reason`, after the handlers of the events that were queued before the disconnect. There is one exception: if the server calls `Disconnect(false)` while the backlog of the socket is full, the event that was waiting for a free slot is queued afterwards, and its handler runs after the disconnect handler, with `Connected()` reporting `false`.
+- `Socket.OnDisconnect(handler)` sets a handler that runs once, with a `socketio.Reason`, after the handlers of the events that were queued before the disconnect. No handler of the socket runs after it: an event that was still waiting for room in a full backlog at that moment is dropped.
 - `Socket.Connected()` reports whether the socket is connected to its namespace.
 
 Disconnect reasons, as passed to the `OnDisconnect` handler. `Reason` is a string type:
@@ -520,7 +542,7 @@ Disconnect reasons, as passed to the `OnDisconnect` handler. `Reason` is a strin
 | `ReasonTransportClose` | `transport close` | The client closed the connection: the WebSocket closed or ended (a close frame, end of stream, or a closed connection while reading), or the client sent an Engine.IO close packet |
 | `ReasonTransportError` | `transport error` | The connection failed: a WebSocket read or write error (including a message over `MaxPayload`), a polling POST that could not be read or was over `MaxPayload`, a polling GET the client abandoned, overlapping polling requests, a ping packet sent by the client, or `MaxBuffer` exceeded |
 | `ReasonPingTimeout` | `ping timeout` | The client did not answer a heartbeat ping within `PingTimeout` |
-| `ReasonParseError` | `parse error` | The client sent data that breaks the protocol: a malformed Engine.IO packet or payload, or a Socket.IO packet that is malformed, has too many attachments, references an attachment twice, names a reserved or non-string event, joins a namespace twice, or has an invalid payload |
+| `ReasonParseError` | `parse error` | The client sent data that breaks the protocol: a malformed Engine.IO packet or payload, or a Socket.IO packet that is malformed, has too many attachments or too many arguments, references an attachment twice, names a reserved or non-string event, joins a namespace twice, or has an invalid payload |
 | `ReasonForcedClose` | `forced close` | Exported, but not delivered in the normal course of events. See the note below |
 | `ReasonServerShutdown` | `server shutting down` | `Server.Close` was called |
 | `ReasonClientDisconnect` | `client namespace disconnect` | The client sent a DISCONNECT for this namespace (`socket.disconnect()` in JavaScript). Its other namespaces are unaffected |
@@ -542,7 +564,8 @@ Notes:
 | The context's error | `Socket.EmitWithAck` | `ctx` was cancelled or its deadline passed |
 | `parser: argument N: ...` wrapping an `encoding/json` error, or `parser: argument N is binary and needs a *[]byte target` | `Event.Bind`, `Args.Bind` | An argument does not decode into its target |
 | An `encoding/json` error | `Socket.Auth` | The handshake payload does not decode into the target |
-| The adapter's error | `BroadcastOperator.Emit`, `Join`, `Leave`, `Disconnect`, `Namespace.Emit` | Publication failed. With the Redis adapter: `redisadapter.ErrBacklogFull`, `redisadapter.ErrClosed`, or an encoding error |
+| `socketio.ErrRoomLimit` (`socketio: room limit reached`) | `Socket.Join`, `BroadcastOperator.Join` | `Options.MaxRooms` is set and the join would take a socket over it (the room named after the socket's ID is not counted). `Socket.Join` joins none of the rooms of the call. `BroadcastOperator.Join` skips that socket and joins the others; the error wraps `ErrRoomLimit`, and is joined with the adapter's error when there is one (use `errors.Is`) |
+| The adapter's error | `BroadcastOperator.Emit`, `Join`, `Leave`, `Disconnect`, `Namespace.Emit` | Publication failed. With the Redis adapter: `redisadapter.ErrBacklogFull`, `redisadapter.ErrClosed`, or an encoding error, for example a room name that is not UTF-8 in a join, a leave or a disconnect, or an emit whose attachments do not match its placeholder offsets |
 | The adapter's `Close` error | `Server.Close` | Nil without an adapter, and nil with the Redis adapter |
 
 `engineio.ErrClosed` is what `engineio.Session.Send` returns; the `socketio` layer reports it as `ErrDisconnected`.
@@ -569,7 +592,7 @@ Each socket has a queue and a worker goroutine that exists only while it has tas
 
 - the connect handler, before any event of the socket;
 - the event middleware and the event handlers;
-- the disconnect handler, after the handlers of the events queued before the disconnect ([Disconnecting](#disconnecting) names the one exception).
+- the disconnect handler, after the handlers of the events queued before the disconnect. No handler of the socket runs after it ([Disconnecting](#disconnecting) says what happens to an event still waiting for room in a full backlog).
 
 Namespace middleware is the exception. It runs before the socket is connected, on the goroutine that reads the client's connection: while it runs, nothing else that client sends is read, in any namespace. Other clients are not affected.
 
@@ -663,7 +686,7 @@ Engine.IO sessions live in the memory of the node that accepted them, and a broa
 func clustered(redisAddr string) *socketio.Server {
 	client := redis.NewClient(&redis.Options{Addr: redisAddr})
 	adapter := redisadapter.New(client, redisadapter.Options{
-		Channel:        "myapp:socketio",
+		Key:            "myapp:socketio",
 		Backlog:        1024,
 		PublishTimeout: 5 * time.Second,
 		OnError:        func(err error) { log.Printf("redis adapter: %v", err) },
@@ -674,29 +697,54 @@ func clustered(redisAddr string) *socketio.Server {
 
 This needs `github.com/redis/go-redis/v9` (package `redis`) and the `redisadapter` package. `redisadapter.New` takes any `redis.UniversalClient`; `*redis.Client` is one.
 
+**Give each application its own `Key`.** The default, `socket.io`, is also the default of the Node.js `@socket.io/redis-adapter`, so every server that keeps it on one Redis server joins the same cluster, Go or Node.js. Pub/Sub ignores the database number: selecting another database does not separate two applications that share a Redis server, only different keys do. Keep `#` out of a key: it separates the parts of a channel name, and a key that holds one can be mistaken for another key followed by a namespace. Do not use `<key>-request` as the key of another application next to `<key>` either: `<key>-request#...` are the request channels of `<key>`, so the two applications would share a channel. Redis is also a trusted boundary: whoever can publish on the channels of the key can emit any event that is not reserved to any client of the cluster (see the end of this section).
+
 `redisadapter.Options`. A zero field means its default.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `Channel` | `string` | `socket.io-golang` | The Pub/Sub channel shared by the cluster. Servers on different channels do not see each other |
+| `Key` | `string` | `socket.io` | The prefix of the Pub/Sub channels of the cluster, with the same meaning as the `key` option of the Node.js `@socket.io/redis-adapter`. Servers with different keys do not see each other; servers with the same key see each other in any database. Keep `#` out of it, and do not pick `<other key>-request` |
 | `Backlog` | `int` | 1024 | Operations that may wait for Redis before `Publish` returns `ErrBacklogFull` |
 | `PublishTimeout` | `time.Duration` | 5 s | Bound on one PUBLISH command |
-| `OnError` | `func(error)` | ignore errors | Receives background errors: a failed PUBLISH or an unreadable message |
+| `OnError` | `func(error)` | ignore errors | Receives background errors: a failed PUBLISH, an unreadable message, or a panic raised while a received message is decoded or applied |
 
 How it behaves:
 
 - `Publish` queues the operation in memory and returns at once. It returns `redisadapter.ErrBacklogFull` when `Backlog` operations are already waiting, and `redisadapter.ErrClosed` after `Close`. These surface as the error of the broadcast call.
 - A PUBLISH that fails (or times out after `PublishTimeout`) is reported to `OnError` and the operation is dropped. There is no retry.
 - Each adapter has a random node ID and ignores the messages it published itself, since the broadcast was already applied locally.
-- `Subscribe` is issued while `socketio.New` runs. The go-redis client does not wait for Redis to confirm a subscription, so the subscription may not be active at once: operations published by other nodes in that first moment can be missed. Redis Pub/Sub keeps no messages for subscribers that are not listening, which also means a node cut off from Redis misses what is published meanwhile.
+- `Subscribe` is issued while `socketio.New` runs. The adapter sends the `PSUBSCRIBE` command and does not wait for Redis to confirm it, so the subscription may not be active at once: operations published by other nodes in that first moment can be missed. Redis Pub/Sub keeps no messages for subscribers that are not listening, which also means a node cut off from Redis misses what is published meanwhile.
+- go-redis hands the messages it receives to the adapter through a channel of 100 messages. If the adapter does not take a message for one minute, go-redis drops it and logs `message is dropped` through its own logger (go-redis v9.7.3, the version in `go.mod`).
 - `Server.Close` closes the adapter and waits for its goroutines. The adapter never closes the Redis client you gave it. Close the client yourself after `server.Close()`.
+- The channels are `<key>#<namespace>#` and `<key>#<namespace>#<room>#` for emits, and `<key>-request#<namespace>#` for joins, leaves and disconnects. The adapter subscribes to the two patterns `<key>#*` and `<key>-request#*`, so a Redis ACL user needs those two patterns, and the right to publish to the channels. A pattern also matches the channels of a longer key that starts with `<key>#`, so a received emit counts only when it arrives on the channel its sender publishes it on: the one of its namespace, or the one of its room when it selects exactly that one room. An emit on any other channel is ignored without an error.
 - A message that cannot be decoded goes to `OnError` and is skipped.
+- A panic raised while a received message is decoded or applied goes to `OnError` too. That message is skipped and the adapter keeps running. A panic of `OnError` itself is logged with `slog.Error`.
+- A join that arrives from another server and would take a socket over `Options.MaxRooms` skips that socket and is logged as a warning through `socketio.Options.Logger`.
 
-Receiving nodes apply a remote operation only to namespaces that already exist on that node, and accept only event packets for emits. The adapter's channel is nevertheless trusted: whoever can publish to it can emit to every client, make their sockets join or leave rooms, and disconnect them, on every node. Keep Redis on a private network with authentication, and give each environment its own `Channel`. When Redis is reached over a network you do not control, turn on TLS (`redis.Options.TLSConfig`), and connect as a Redis ACL user that is restricted to that channel.
+**Sharing Redis with Node.js servers.** The messages are those of the Node.js `@socket.io/redis-adapter` 8 with its default parser (MessagePack). A Go server and a Node.js server that use the same Redis server and the same key form one cluster. On the Node.js side the key is the `key` option of the adapter:
+
+```js
+io.adapter(createAdapter(pubClient, subClient, { key: "myapp:socketio" }));
+```
+
+In both directions, an emit (with JSON or binary arguments, and with room and except selections), a join, a leave and a disconnect started on one server reach the sockets of the others. `BroadcastOperator.Join`, `Leave` and `Disconnect` correspond to `socketsJoin`, `socketsLeave` and `disconnectSockets` of Node.js. The limits of such a cluster:
+
+- `fetchSockets`, `allSockets` and `serverSideEmit` started on a Node.js server do not see the Go servers: Go subscribes by pattern, so the Redis `PUBSUB NUMSUB` count does not include it and the Node.js server does not wait for it. Those calls keep working among the Node.js servers.
+- An emit with acknowledgement started on a Node.js server does not reach Go clients.
+- Go has no equivalent of those calls. A Node.js request that Go does not implement is ignored without error.
+- The `volatile` and `compress` flags are not carried.
+- A message the Go server cannot read is refused whole and reported to `OnError`, never half applied. Examples: a room or except name that is not a string (a `null` in the room list of a join, leave or disconnect request too), a packet whose type is not 2, data that is not an array starting with an event name that is not reserved, a map key that is not a string, an extension other than a timestamp, and data nested more than 510 containers deep. The rules are in [protocol.md](protocol.md#7-redis-adapter-wire-format).
+- The Go server does not cap the binary attachments of a message from Redis. The limit of 10 per packet (`parser.DefaultMaxAttachments`) and `Options.MaxArguments` apply to the packets of clients only.
+- The codec reads and writes `data` without building a tree of it. In one measurement (Apple arm64, Go 1.27.1, inputs of 0.4 to 0.8 MB), publishing an event whose `data` is one long string allocated about as many bytes as `data` holds, and reading the message about twice its size; inputs built to cost most took 8 to 34 times the message to read, and publishing 200,000 empty arrays about 8 times. These are measurements, not guarantees; the table is in [protocol.md](protocol.md#79-what-a-message-costs).
+- The sharded adapter (Redis 7 sharded Pub/Sub) is a different protocol and is not supported.
+- Delivery is at most once, as with any Redis Pub/Sub.
+
+Tested with: `socket.io` 4.8.3, `@socket.io/redis-adapter` 8.3.0 and `ioredis` 5.10.1 (pinned in `test/interop/package.json`), Node.js 26, and a Redis 8 server on the loopback interface. `make interop` runs `test/interop` (build tag `interop`; it needs Node.js and a Redis server at `REDIS_ADDR`, `127.0.0.1:6379` by default, and is skipped without one). It runs this server next to a real Node.js server on one Redis. Not tested: other versions of these, `@socket.io/redis-emitter`, the `redis` (node-redis) client, Redis Cluster and the sharded adapter. The codec has its own tests in `redisadapter/msgpack_test.go` and `redisadapter/wire_test.go`. The message layout is in [protocol.md](protocol.md#7-redis-adapter-wire-format).
+
+Receiving nodes apply a remote operation only to namespaces that already exist on that node, and accept only event packets for emits. Redis is nevertheless a trusted boundary: whoever can publish on the channels of the key can emit to every client, make their sockets join or leave rooms, and disconnect them, on every server of the cluster, Go and Node.js alike. Keep Redis on a private network with authentication, and give each application and environment its own `Key`. When Redis is reached over a network you do not control, turn on TLS (`redis.Options.TLSConfig`), and connect as a Redis ACL user that is restricted to the channels of the key.
 
 Things the adapter does not do:
 
-- The wire format belongs to this library. It is not compatible with the Node.js `@socket.io/redis-adapter`, so Go and Node.js servers cannot share a channel.
 - `Namespace.Sockets()` and `BroadcastOperator.Sockets()` list the sockets of this node only. There is no cluster-wide listing.
 - Broadcasts cannot request acknowledgements, with or without an adapter.
 
@@ -720,7 +768,8 @@ The interface as declared in the `socketio` package uses the unqualified name `O
 - `Subscribe(apply)` gives you the function that applies an operation from another server to this server's sockets. `socketio.New` calls it once, before it returns.
 - `Close()` releases your resources. `Server.Close` calls it and returns its error.
 - The server that starts an operation has already applied it locally. Your adapter must not hand a server the operations that server published.
-- `Operation` is the unit you carry. It has JSON tags (`kind`, `nsp`, `rooms`, `except`, `packet`, `targets`, `close`) and survives a round trip through `encoding/json`. Its `Kind` is one of `socketio.OpEmit`, `socketio.OpJoin`, `socketio.OpLeave` or `socketio.OpDisconnect`.
+- `Operation` is the unit you carry. It has no JSON tags, so `encoding/json` uses its Go field names (`Kind`, `Namespace`, `Rooms`, `Except`, `Packet`, `Targets`, `Close`), and a value survives a round trip through `encoding/json`. Its `Kind` is one of `socketio.OpEmit`, `socketio.OpJoin`, `socketio.OpLeave` or `socketio.OpDisconnect`.
+- The `Packet` of an `OpEmit` is a `*parser.Packet`. The server writes it to its own clients from `Data` and `Attachments`. `Placeholders` holds the offset in `Data` of the placeholder of each attachment, in the order of `Attachments`; `parser.NewEvent` and `parser.NewAck` fill it, and an adapter that carries the whole `Operation`, as `encoding/json` does, keeps it. An adapter that writes the packet in another format needs it to tell a placeholder from an argument that only looks like one. If your adapter builds or changes the `Packet` of an emit, keep `Placeholders` in step with `Attachments`. The Redis adapter refuses to publish a packet whose offsets do not match its attachments (`redisadapter: attachment without its placeholder`), and it sets them on the packets it receives.
 - `apply` rewrites the packet's namespace of an emit, so give every receiving server its own copy of an `Operation`, never the same value or the same `*parser.Packet`.
 - The same trust rule as for Redis holds: whoever can publish to your transport can emit to every client.
 
@@ -804,7 +853,14 @@ This adapter delivers synchronously. A real one should queue, as `redisadapter` 
 
 ## Logging
 
-`Options.Logger` is a `*slog.Logger`. The default is `slog.Default()`. The library logs one thing: a panic recovered in a handler or middleware, at level `Error` with the message `socketio: handler panic` and the attributes `panic` and `stack`. The Redis adapter reports its background errors through `redisadapter.Options.OnError` instead.
+`Options.Logger` is a `*slog.Logger`. The default is `slog.Default()`. The library logs four things:
+
+- A panic recovered in a handler or middleware, at level `Error` with the message `socketio: handler panic` and the attributes `panic` and `stack`.
+- A panic recovered in `Engine.CheckOrigin` or `Engine.AllowRequest`, at level `Error` with the message `engineio: callback panic` and the attributes `callback` (`CheckOrigin` or `AllowRequest`), `panic` and `stack`. It goes to `Engine.Logger`, which `socketio.New` fills with `Options.Logger` when it is nil. The request is refused with HTTP 403.
+- A Socket.IO packet that the server refuses and that therefore ends its connection, at level `Warn` with the message `socketio: malformed packet` and the attribute `error`. The client is not told the reason. An Engine.IO frame that does not decode is not logged.
+- An operation from another server that could not be applied in full, at level `Warn` with the message `socketio: operation of another server not fully applied` and the attributes `namespace`, `kind` and `error`. Today this is a join that skipped a socket because of `MaxRooms`.
+
+The Redis adapter reports its background errors through `redisadapter.Options.OnError` instead. The one thing it logs is a panic of `OnError` itself, through `slog.Error`.
 
 ```go
 func withLogger() *socketio.Server {
@@ -821,12 +877,12 @@ If you want connection logs, add them in a namespace middleware and in `OnDiscon
 - **Authentication.** Check credentials in a namespace middleware, from `Socket.Auth` or from `Socket.Request()`. A socket that has not passed the middleware never reaches your handlers. Guard every namespace, the main namespace `"/"` included: it always exists and admits everyone until `server.Use` says otherwise.
 - **Room names.** Check a room name that comes from the client before you pass it to `To` or `Join`. See [Rooms](#rooms).
 - **No secrets in connect errors.** The text of any error your middleware returns is sent to the client.
-- **HTTP server timeouts.** Set `ReadHeaderTimeout` and `ReadTimeout` on your `http.Server`. `ReadTimeout` bounds how long a client may take to send one request, body included, so it cuts a polling POST that trickles in. It does not cut a long-poll that is being held, because the server lifts the read deadline once the request has been read, and it does not apply to a WebSocket after the upgrade. (Checked on loopback with Go 1.27.1 and `ReadTimeout` 1 s: polling GETs held for 3 s were answered normally, and a POST whose body stalled was answered with 400 after 1 s. Without `ReadTimeout` the same POST was still open after 6 s, and the session ended only through the ping timeout.) Do not set a `WriteTimeout` shorter than `Engine.PingInterval`: an idle long-polling request is answered only when the next packet is queued, which on an idle session is the next heartbeat ping. A `WriteTimeout` that expires first would cut it. (This follows from how polling requests are held in `engineio/polling.go`; it was not exercised against a live server.)
+- **HTTP server timeouts.** Set `ReadHeaderTimeout` and `ReadTimeout` on your `http.Server`. `ReadTimeout` bounds how long a client may take to send one request, body included, so it cuts a polling POST that trickles in. It does not cut a long-poll that is being held, because the server lifts the read deadline once the request has been read, and it does not apply to a WebSocket after the upgrade. (This follows from the `net/http` source of Go 1.27.1: it sets the read deadline for the whole request, clears it once the body has been read or when the request has none, and clears both deadlines when a handler hijacks the connection, as the WebSocket upgrade does. It was not measured here.) Do not set a `WriteTimeout` shorter than `Engine.PingInterval`: an idle long-polling request is answered only when the next packet is queued (`nextBatch` in `engineio/polling.go` waits for one), which on an idle session is the next heartbeat ping. `net/http` starts the write deadline once the request has been read, so a `WriteTimeout` that expires first would cut the response. (This follows from the code of the two packages; it was not exercised against a live server.)
 - **Proxy and load balancer timeouts.** Keep idle timeouts longer than `Engine.PingInterval`, because an idle connection carries traffic only at each heartbeat. Pass WebSocket upgrades through.
 - **Sticky routing or WebSocket only.** Needed whenever more than one node serves clients. See [Scaling with the Redis adapter](#scaling-with-the-redis-adapter).
-- **Redis.** Private network, authentication, TLS when the network is not yours, a channel per environment, and an `OnError` that you alert on. Close the Redis client after `server.Close()`.
-- **Limits.** Review `MaxPayload` (1,000,000 bytes), `MaxBuffer` (16 MiB), `MaxAttachments` (10) and `EventBacklog` (64) against your traffic and memory budget. A `MaxBuffer` per client multiplies by your connection count, and so does the memory a stalled socket can hold, which can be many times the bytes it received. See [Limits and backpressure](#limits-and-backpressure).
-- **Connection count.** The library does not cap the number of sessions or the rooms a socket joins. Every session keeps its handshake request, headers included, until it ends. Set `MaxHeaderBytes` on your `http.Server`, limit handshakes in `Engine.AllowRequest`, and cap connections per client at the proxy if you need a hard limit.
+- **Redis.** Private network, authentication, TLS when the network is not yours, a `Key` of its own for each application and environment (the default `socket.io` is shared with every other application that keeps it, in every database), and an `OnError` that you alert on. Close the Redis client after `server.Close()`.
+- **Limits.** Review `MaxPayload` (1,000,000 bytes), `MaxBuffer` (16 MiB), `MaxAttachments` (10), `MaxArguments` (64) and `EventBacklog` (64) against your traffic and memory budget. If your clients send more than 63 arguments in one event, raise `MaxArguments`: the Node.js server has no such cap, and over it the connection ends with a parse error. A `MaxBuffer` per client multiplies by your connection count, and so does the memory a stalled socket can hold, which can be more than the bytes it received. See [Limits and backpressure](#limits-and-backpressure).
+- **Connection count.** The caps on sessions (`Engine.MaxSessions`) and on the rooms of one socket (`MaxRooms`) exist and are off by default; set them if you need a hard limit. `MaxSessions` is global, so one client can fill it: pair it with a limit per client in `Engine.AllowRequest`. Every session keeps its handshake request, headers included, until it ends. Set `MaxHeaderBytes` on your `http.Server`, limit handshakes in `Engine.AllowRequest`, and cap connections per client at the proxy.
 - **Handlers.** Do not block in them. Give every `EmitWithAck` a context with a deadline. Remember that handlers of one socket run one at a time.
 - **Shutdown.** `server.Close()` first, then `http.Server.Shutdown`. See [Graceful shutdown](#graceful-shutdown).
 - **Rate limiting.** Use `Engine.AllowRequest` for handshakes. The library applies no per-event rate limit; use a socket middleware (`Socket.Use`) if you need one.
@@ -851,7 +907,8 @@ Their reference is in the Go doc comments (`go doc ./engineio`, `go doc ./parser
 - Volatile emits
 - Broadcasts with acknowledgements
 - Cluster-wide socket listing: `Sockets` is local to the node
-- Wire compatibility with the Node.js `@socket.io/redis-adapter`
+- The parts of the Node.js `@socket.io/redis-adapter` that wait for an answer: `fetchSockets`, `allSockets` and `serverSideEmit` started on a Node.js server do not see Go servers, and an emit with acknowledgement started on a Node.js server does not reach Go clients. See [Scaling with the Redis adapter](#scaling-with-the-redis-adapter)
+- The sharded adapter of `@socket.io/redis-adapter` (Redis 7 sharded Pub/Sub)
 - Dynamic (regex or function) namespaces
 - The `disconnecting` event
 - Catch-all listeners (`onAny`)

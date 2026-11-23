@@ -1,6 +1,6 @@
 package socketio
 
-import "github.com/nuriontech/socket.io-golang/parser"
+import "github.com/hilmanzhy/socket.io-golang/parser"
 
 // OperationKind names what a broadcast operation does to its targets.
 type OperationKind string
@@ -16,18 +16,18 @@ const (
 // Operation is one broadcast as it travels between the servers of a cluster.
 // Every server applies it to its own sockets.
 type Operation struct {
-	Kind      OperationKind `json:"kind"`
-	Namespace string        `json:"nsp"`
+	Kind      OperationKind
+	Namespace string
 	// Rooms selects the sockets in any of these rooms; empty selects all.
-	Rooms []string `json:"rooms,omitempty"`
+	Rooms []string
 	// Except removes the sockets in any of these rooms from the selection.
-	Except []string `json:"except,omitempty"`
+	Except []string
 	// Packet is the event to send, for OpEmit.
-	Packet *parser.Packet `json:"packet,omitempty"`
+	Packet *parser.Packet
 	// Targets are the rooms to join or leave, for OpJoin and OpLeave.
-	Targets []string `json:"targets,omitempty"`
+	Targets []string
 	// Close also closes the underlying connections, for OpDisconnect.
-	Close bool `json:"close,omitempty"`
+	Close bool
 }
 
 // Adapter carries operations between the servers of a cluster. The server
@@ -60,5 +60,7 @@ func (s *Server) applyRemote(op Operation) {
 		}
 		op.Packet.Namespace = namespace.name
 	}
-	namespace.apply(op)
+	if err := namespace.apply(op); err != nil {
+		s.opts.Logger.Warn("socketio: operation of another server not fully applied", "namespace", namespace.name, "kind", string(op.Kind), "error", err)
+	}
 }

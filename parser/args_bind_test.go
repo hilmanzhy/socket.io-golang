@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 func TestArgsBindTypedTargets(t *testing.T) {

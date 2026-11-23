@@ -1,6 +1,7 @@
 package engineio_test
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"os"
@@ -8,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/nuriontech/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
 )
 
 func (h *harness) expectRejected(sid string) {
@@ -180,6 +181,7 @@ func TestUpgradeBadProbe(t *testing.T) {
 		{"text instead of the probe", func(ws *wsConn) { ws.write("hello") }},
 		{"binary instead of the probe", func(ws *wsConn) { ws.writeBinary([]byte("2probe")) }},
 		{"ping without the probe suffix", func(ws *wsConn) { ws.write("2") }},
+		{"text frame starting with b", func(ws *wsConn) { ws.write("bAQID") }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -231,6 +233,32 @@ func TestUpgradeBadConfirmation(t *testing.T) {
 	h.post(sid, "4back")
 	if got := rec.text(t); got != "back" {
 		t.Errorf("received %q", got)
+	}
+}
+
+func TestUpgradeBase64FrameInsteadOfConfirmation(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engineio.Options{})
+	sid, rec := h.open()
+	pending := h.async(http.MethodGet, h.pollingURL(sid), "")
+	ws := h.connectUpgrade(sid)
+	ws.write("2probe")
+	if got := ws.text(); got != "3probe" {
+		t.Fatalf("probe answer = %q", got)
+	}
+	if r := pending.wait(t); r.body != "6" {
+		t.Fatalf("pending poll = %q, want 6", r.body)
+	}
+	ws.write("bAQID")
+	if err := ws.readError(); err == nil {
+		t.Fatal("upgrade connection stayed open")
+	}
+	if !rec.open() {
+		t.Fatal("a failed upgrade ended the session")
+	}
+	h.post(sid, "bAQID")
+	if m := rec.message(t); !m.Binary || !bytes.Equal(m.Data, []byte{1, 2, 3}) {
+		t.Errorf("message = %+v, want binary 1,2,3 over polling", m)
 	}
 }
 
@@ -325,5 +353,36 @@ func TestUpgradeWithoutWebSocketHeaders(t *testing.T) {
 	ws.write("4after")
 	if got := ws.text(); got != "4after" {
 		t.Errorf("echo after the retried upgrade = %q", got)
+	}
+}
+
+// TestUpgradeProbeClosedWhenSessionEnds checks that the WebSocket of an upgrade
+// probe is closed at once when the session ends, not when UpgradeTimeout runs
+// out.
+func TestUpgradeProbeClosedWhenSessionEnds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		probe func(*wsConn)
+	}{
+		{"before the probe packet", func(*wsConn) {}},
+		{"after the probe answer", func(ws *wsConn) {
+			ws.write("2probe")
+			if got := ws.text(); got != "3probe" {
+				ws.t.Fatalf("probe answer = %q, want 3probe", got)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, engineio.Options{UpgradeTimeout: time.Minute})
+			sid, rec := h.open()
+			ws := h.connectUpgrade(sid)
+			c.probe(ws)
+			h.post(sid, "1")
+			rec.ended(t)
+			ws.readError()
+		})
 	}
 }

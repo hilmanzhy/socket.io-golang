@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 // eventually polls until condition holds or patience runs out.
@@ -98,6 +98,21 @@ func expectDelivery(t *testing.T, guests []guest, want []frame, recipients ...st
 			g.c.delivered(g.s, want...)
 		} else {
 			g.c.delivered(g.s)
+		}
+	}
+}
+
+// buffered returns the text frames the client has received and not read yet.
+// Once the connection has closed, that is everything the server sent after the
+// last frame the test read.
+func (c *client) buffered() []string {
+	var out []string
+	for {
+		select {
+		case f := <-c.frames:
+			out = append(out, string(f.data))
+		default:
+			return out
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package socketio
 
 import (
+	"cmp"
 	"errors"
 	"runtime/debug"
 	"sync"
@@ -98,9 +99,11 @@ func (n *Namespace) welcome(socket *Socket) {
 	}
 }
 
-// apply runs a broadcast operation against the sockets of this server.
-func (n *Namespace) apply(op Operation) {
+// apply runs a broadcast operation against the sockets of this server. Its
+// error is ErrRoomLimit when a join skipped at least one socket.
+func (n *Namespace) apply(op Operation) error {
 	targets := n.rooms.match(op.Rooms, op.Except)
+	var failure error
 	switch op.Kind {
 	case OpEmit:
 		messages := frames(op.Packet)
@@ -109,7 +112,7 @@ func (n *Namespace) apply(op Operation) {
 		}
 	case OpJoin:
 		for _, socket := range targets {
-			socket.Join(op.Targets...)
+			failure = cmp.Or(failure, socket.Join(op.Targets...))
 		}
 	case OpLeave:
 		for _, socket := range targets {
@@ -120,4 +123,5 @@ func (n *Namespace) apply(op Operation) {
 			socket.Disconnect(op.Close)
 		}
 	}
+	return failure
 }

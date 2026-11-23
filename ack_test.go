@@ -3,12 +3,13 @@ package socketio_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 type answer struct {
@@ -291,4 +292,102 @@ func TestAcknowledgementWithoutAWaitingRequestIsIgnored(t *testing.T) {
 	c.send(`430[]`)
 	c.ping("/")
 	c.barrier(s)
+}
+
+func TestAckKeepsItsShotUntilAnAcknowledgementIsSent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		bad  []any
+	}{
+		{"a channel argument", []any{make(chan int)}},
+		{"a func argument", []any{func() {}}},
+		{"an unencodable argument after a valid one", []any{"x", make(chan int)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			type outcome struct{ bad, good, again error }
+			got := make(chan outcome, 1)
+			f := newFixture(t, socketio.Options{}, func(s *socketio.Socket) {
+				s.On("q", func(e *socketio.Event) {
+					got <- outcome{e.Ack(tc.bad...), e.Ack("ok"), e.Ack("again")}
+				})
+			})
+			c, _ := f.join(t)
+			c.send(`427["q"]`)
+			c.expect(`437["ok"]`)
+			if o := receive(t, got); o.bad == nil || o.good != nil || o.again != nil {
+				t.Errorf("Ack errors = %v, %v, %v, want an error, nil, nil", o.bad, o.good, o.again)
+			}
+			c.ping("/")
+		})
+	}
+}
+
+func TestConcurrentAcksSendExactlyOne(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		first   []any
+		second  []any
+		wantErr int
+		frames  []string
+	}{
+		{"both valid", []any{1}, []any{2}, 0, []string{`437[1]`, `437[2]`}},
+		{"one unencodable", []any{make(chan int)}, []any{2}, 1, []string{`437[2]`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			failed := make(chan int, 1)
+			f := newFixture(t, socketio.Options{}, func(s *socketio.Socket) {
+				s.On("race", func(e *socketio.Event) {
+					var wg sync.WaitGroup
+					var mu sync.Mutex
+					errs := 0
+					for _, args := range [][]any{tc.first, tc.second} {
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							if e.Ack(args...) != nil {
+								mu.Lock()
+								errs++
+								mu.Unlock()
+							}
+						}()
+					}
+					wg.Wait()
+					failed <- errs
+				})
+			})
+			c, _ := f.join(t)
+			c.send(`427["race"]`)
+			if got := string(c.next().data); !slices.Contains(tc.frames, got) {
+				t.Errorf("acknowledgement = %q, want one of %q", got, tc.frames)
+			}
+			if got := receive(t, failed); got != tc.wantErr {
+				t.Errorf("%d calls returned an error, want %d", got, tc.wantErr)
+			}
+			c.ping("/")
+		})
+	}
+}
+
+func TestAckAfterTheSocketDisconnectedKeepsReportingIt(t *testing.T) {
+	t.Parallel()
+	events := make(chan *socketio.Event, 1)
+	f := newFixture(t, socketio.Options{}, func(s *socketio.Socket) {
+		s.On("q", func(e *socketio.Event) { events <- e })
+	})
+	c, _ := f.join(t)
+	c.send(`427["q"]`)
+	e := receive(t, events)
+	c.send("41")
+	f.probe.reason(t)
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := e.Ack("late"); !errors.Is(err, socketio.ErrDisconnected) {
+			t.Errorf("Ack attempt %d = %v, want ErrDisconnected", attempt, err)
+		}
+	}
 }

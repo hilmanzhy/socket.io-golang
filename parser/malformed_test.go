@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 var reservedNames = []string{"connect", "connect_error", "disconnect", "disconnecting", "newListener", "removeListener"}
@@ -149,6 +149,13 @@ func TestPayloadMalformed(t *testing.T) {
 		{"binary event nested placeholder without num", `51-["x",{"a":[{"_placeholder":true}]}]`, blobs(1)},
 		{"binary event nested negative placeholder", `51-["x",[{"_placeholder":true,"num":-2}]]`, blobs(1)},
 		{"binary event nested placeholder with string num", `51-["x",{"a":{"_placeholder":true,"num":"0"}}]`, blobs(1)},
+		{"binary event placeholder whose last num is a string", `51-["x",{"num":0,"_placeholder":true,"num":"0"}]`, blobs(1)},
+		{"binary event placeholder whose last num is an array", `51-["x",{"_placeholder":true,"num":0,"num":[0]}]`, blobs(1)},
+		{"binary event placeholder whose last num is an object", `51-["x",{"_placeholder":true,"num":0,"num":{"num":0}}]`, blobs(1)},
+		{"binary event placeholder with an exponent", `51-["x",{"_placeholder":true,"num":0e0}]`, blobs(1)},
+		{"binary event placeholder with a zero fraction", `51-["x",{"_placeholder":true,"num":0.0}]`, blobs(1)},
+		{"binary event nested placeholder with members in another order", `51-["x",{"a":[{"num":1,"_placeholder":true}]}]`, blobs(1)},
+		{"binary event nested placeholder repeated in another order", `51-["x",{"a":{"num":0,"_placeholder":true},"b":[` + ph0 + `]}]`, blobs(1)},
 		{"binary event placeholder repeated", `51-["x",` + ph0 + `,` + ph0 + `]`, blobs(1)},
 		{"binary event placeholder repeated among others", `52-["x",` + ph0 + `,` + ph1 + `,` + ph0 + `]`, blobs(2)},
 		{"binary event nested placeholder repeated in an object", `51-["x",{"a":` + ph0 + `,"b":` + ph0 + `}]`, blobs(1)},

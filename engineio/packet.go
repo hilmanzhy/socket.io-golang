@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"iter"
 )
 
 type kind byte
@@ -41,6 +42,15 @@ func (p packet) prefix() []byte {
 	return kindPrefix[p.kind-kindOpen]
 }
 
+// wireSize is the number of bytes appendPayload writes for p alone, without a
+// separator.
+func (p packet) wireSize() int64 {
+	if p.binary {
+		return 1 + int64(base64.StdEncoding.EncodedLen(len(p.data)))
+	}
+	return 1 + int64(len(p.data))
+}
+
 func appendPayload(dst []byte, packets []packet) []byte {
 	for i, p := range packets {
 		if i > 0 {
@@ -57,17 +67,19 @@ func appendPayload(dst []byte, packets []packet) []byte {
 	return dst
 }
 
-func decodePayload(body []byte) ([]packet, error) {
-	chunks := bytes.Split(body, []byte{separator})
-	packets := make([]packet, 0, len(chunks))
-	for _, chunk := range chunks {
-		p, err := decodePacket(chunk)
-		if err != nil {
-			return nil, err
+// payloadPackets yields the packets of a payload in order and decodes each one
+// when it is reached, so the work and the memory do not grow with the number of
+// separators. A malformed packet is yielded with its error and ends the
+// sequence.
+func payloadPackets(body []byte) iter.Seq2[packet, error] {
+	return func(yield func(packet, error) bool) {
+		for chunk := range bytes.SplitSeq(body, []byte{separator}) {
+			p, err := decodePacket(chunk)
+			if !yield(p, err) || err != nil {
+				return
+			}
 		}
-		packets = append(packets, p)
 	}
-	return packets, nil
 }
 
 func decodePacket(chunk []byte) (packet, error) {

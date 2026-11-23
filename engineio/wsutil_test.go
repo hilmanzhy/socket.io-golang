@@ -2,8 +2,8 @@ package engineio_test
 
 import (
 	"errors"
+	"net"
 	"net/http"
-	"os"
 	"testing"
 	"time"
 
@@ -118,16 +118,18 @@ func (c *wsConn) writeBinary(b []byte) {
 }
 
 // readError discards frames until the connection fails and returns that error.
+// It fails the test when the failure is only the wait running out. The timeout
+// is found through net.Error: gorilla hides the deadline error from errors.Is.
 func (c *wsConn) readError() error {
 	c.t.Helper()
-	deadline := time.Now().Add(wait)
+	c.SetReadDeadline(time.Now().Add(wait))
 	for {
-		c.SetReadDeadline(deadline)
 		_, _, err := c.ReadMessage()
 		if err == nil {
 			continue
 		}
-		if errors.Is(err, os.ErrDeadlineExceeded) {
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
 			c.t.Fatal("connection still open after the deadline")
 		}
 		return err

@@ -3,7 +3,7 @@ package parser_test
 import (
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 func BenchmarkEncodeEvent(b *testing.B) {

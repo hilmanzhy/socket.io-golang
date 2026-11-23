@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 const (

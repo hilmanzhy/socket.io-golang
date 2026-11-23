@@ -2,8 +2,11 @@
   "name": "socket.io-golang-interop",
   "private": true,
   "type": "module",
-  "description": "Drives socket.io-golang with the official JavaScript client.",
+  "description": "Drives socket.io-golang with the official JavaScript client and next to a Node.js server.",
   "dependencies": {
+    "@socket.io/redis-adapter": "8.3.0",
+    "ioredis": "5.10.1",
+    "socket.io": "4.8.3",
     "socket.io-client": "4.8.3"
   }
 }

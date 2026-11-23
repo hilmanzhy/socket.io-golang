@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
 )
 
 func TestPollingEcho(t *testing.T) {
@@ -211,6 +211,9 @@ func TestPollingMalformedPost(t *testing.T) {
 				t.Errorf("reason = %q, want %q", got, engineio.ReasonParseError)
 			}
 			rec.ended(t)
+			if n := len(rec.messages); n != 0 {
+				t.Errorf("%d messages of the refused body were delivered, want none", n)
+			}
 			if r := h.poll(sid); r.status != http.StatusBadRequest {
 				t.Errorf("poll after parse error = %d, want 400", r.status)
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -157,12 +158,15 @@ func (s *Session) end(reason CloseReason) {
 
 // notify waits for the Receive in flight, then reports the end of the
 // session. It runs on its own goroutine because end and Close may be called
-// from inside Receive.
+// from inside Receive. A session whose accept panicked has no Receiver and
+// reports nothing.
 func (s *Session) notify(reason CloseReason) {
 	s.receiving.Lock()
 	receiver := s.receiver
 	s.receiving.Unlock()
-	receiver.Closed(reason)
+	if receiver != nil {
+		receiver.Closed(reason)
+	}
 }
 
 func (s *Session) deliver(m Message) {
@@ -208,6 +212,33 @@ func (s *Session) drain(spare []packet) []packet {
 	batch := s.queue
 	s.queue, s.buffered = spare, 0
 	return batch
+}
+
+// takeFront removes from the queue the packets that fit in one polling payload
+// of limit bytes and returns them, leaving the rest queued in order. The
+// caller holds s.mu.
+func (s *Session) takeFront(limit int64) []packet {
+	n := fitting(s.queue, limit)
+	if n == len(s.queue) {
+		return s.drain(nil)
+	}
+	batch := slices.Clone(s.queue[:n])
+	clear(s.queue[:n])
+	s.queue = s.queue[n:]
+	s.buffered -= messageBytes(batch)
+	return batch
+}
+
+// messageBytes totals the data of the messages among packets, which is what
+// Session.buffered counts.
+func messageBytes(packets []packet) int64 {
+	size := int64(0)
+	for _, p := range packets {
+		if p.kind == kindMessage {
+			size += int64(len(p.data))
+		}
+	}
+	return size
 }
 
 // arm replaces the session timer; a timer that was replaced never runs its

@@ -224,6 +224,103 @@ func TestDecodePayload(t *testing.T) {
 	}
 }
 
+func TestWireSize(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		p    packet
+		want int64
+	}{
+		{"empty text", packet{kind: kindMessage}, 1},
+		{"text", packet{kind: kindMessage, data: []byte("hello")}, 6},
+		{"empty binary", packet{kind: kindMessage, binary: true}, 1},
+		{"binary of one byte", packet{kind: kindMessage, binary: true, data: []byte{1}}, 5},
+		{"binary of three bytes", packet{kind: kindMessage, binary: true, data: []byte{1, 2, 3}}, 5},
+		{"binary of four bytes", packet{kind: kindMessage, binary: true, data: []byte{1, 2, 3, 4}}, 9},
+		{"control packet", packet{kind: kindClose}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.p.wireSize(); got != tt.want {
+				t.Errorf("wireSize = %d, want %d", got, tt.want)
+			}
+		})
+	}
+	t.Run("matches appendPayload", func(t *testing.T) {
+		t.Parallel()
+		rng := rand.New(rand.NewPCG(3, 4))
+		for i := range 500 {
+			p := randomPacket(rng)
+			if got, want := p.wireSize(), int64(len(appendPayload(nil, []packet{p}))); got != want {
+				t.Fatalf("round %d: wireSize = %d for %+v, encoded size %d", i, got, p, want)
+			}
+		}
+	})
+}
+
+func TestFitting(t *testing.T) {
+	t.Parallel()
+	text := func(s string) packet { return packet{kind: kindMessage, data: []byte(s)} }
+	binary := func(n int) packet { return packet{kind: kindMessage, binary: true, data: make([]byte, n)} }
+	abc := []packet{text("aa"), text("bb"), text("cc")}
+	tests := []struct {
+		name  string
+		queue []packet
+		limit int64
+		want  int
+	}{
+		{"empty queue", nil, 10, 0},
+		{"all fit exactly", abc, 11, 3},
+		{"all fit with room", abc, 100, 3},
+		{"one byte short of the last", abc, 10, 2},
+		{"two fit exactly", abc, 7, 2},
+		{"one byte short of two", abc, 6, 1},
+		{"one fits exactly", abc, 3, 1},
+		{"limit below one packet", abc, 1, 1},
+		{"zero limit", abc, 0, 1},
+		{"oversized first packet goes alone", []packet{text("0123456789"), text("a")}, 5, 1},
+		{"oversized middle packet waits for the next payload", []packet{text("a"), text("0123456789"), text("b")}, 5, 1},
+		{"oversized only packet", []packet{text("0123456789")}, 5, 1},
+		{"binary counts its base64 size", []packet{binary(9), binary(9), binary(9)}, 27, 2},
+		{"binary one byte short", []packet{binary(9), binary(9), binary(9)}, 40, 2},
+		{"binary exactly three", []packet{binary(9), binary(9), binary(9)}, 41, 3},
+		{"text and binary exactly three", []packet{text("ab"), binary(3), text("cd")}, 13, 3},
+		{"text and binary one byte short", []packet{text("ab"), binary(3), text("cd")}, 12, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := fitting(tt.queue, tt.limit); got != tt.want {
+				t.Errorf("fitting = %d, want %d", got, tt.want)
+			}
+		})
+	}
+	t.Run("agrees with appendPayload", func(t *testing.T) {
+		t.Parallel()
+		rng := rand.New(rand.NewPCG(5, 6))
+		for i := range 500 {
+			queue := make([]packet, 1+rng.IntN(8))
+			for j := range queue {
+				queue[j] = randomPacket(rng)
+			}
+			limit := int64(rng.IntN(120))
+			n := fitting(queue, limit)
+			if n < 1 || n > len(queue) {
+				t.Fatalf("round %d: fitting = %d for a queue of %d", i, n, len(queue))
+			}
+			if size := int64(len(appendPayload(nil, queue[:n]))); n > 1 && size > limit {
+				t.Fatalf("round %d: %d packets take %d bytes, over the limit %d", i, n, size, limit)
+			}
+			if n < len(queue) {
+				if size := int64(len(appendPayload(nil, queue[:n+1]))); size <= limit {
+					t.Fatalf("round %d: packet %d would still fit: %d bytes of %d", i, n+1, size, limit)
+				}
+			}
+		}
+	})
+}
+
 func randomPacket(rng *rand.Rand) packet {
 	data := make([]byte, rng.IntN(40))
 	if rng.IntN(3) == 0 {
@@ -293,4 +390,17 @@ func FuzzDecodePayload(f *testing.F) {
 			t.Fatalf("decode, encode, decode changed the packets: %+v then %+v", packets, again)
 		}
 	})
+}
+
+// decodePayload returns every packet of a payload, or the error of the first
+// malformed one and no packets.
+func decodePayload(body []byte) ([]packet, error) {
+	var packets []packet
+	for p, err := range payloadPackets(body) {
+		if err != nil {
+			return nil, err
+		}
+		packets = append(packets, p)
+	}
+	return packets, nil
 }

@@ -14,7 +14,10 @@ vet:
 test:
 	go test -race -count=1 ./...
 
-# Runs the official JavaScript client against the server. Needs Node.js.
+# Runs the official JavaScript client against the server, and the server next
+# to a Node.js server on one Redis. Needs Node.js; the second test also needs
+# a Redis server (REDIS_ADDR, 127.0.0.1:6379 by default) and is skipped
+# without one.
 interop:
 	cd test/interop && npm ci --no-audit --no-fund
 	go test -tags interop -count=1 -v ./test/interop

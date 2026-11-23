@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 // bus connects fake adapters the way a message broker would: an operation

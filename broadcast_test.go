@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 // crowd seats four guests: red is in room "red", both in "red" and "blue",

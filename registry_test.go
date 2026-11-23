@@ -37,7 +37,7 @@ func roomCount(r *registry) int {
 
 func TestRegistryAddPutsTheSocketInItsOwnRoom(t *testing.T) {
 	t.Parallel()
-	r := newRegistry()
+	r := newRegistry(0)
 	s := &Socket{id: "s1"}
 	if r.has("s1") {
 		t.Fatal("an empty registry has a socket")
@@ -70,7 +70,7 @@ func TestRegistryRemove(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := newRegistry()
+			r := newRegistry(0)
 			s := newSocketIn(r, "s1", "room")
 			if got := tc.remove(r, s); got != tc.want {
 				t.Errorf("remove = %v, want %v", got, tc.want)
@@ -89,7 +89,7 @@ func TestRegistryRemove(t *testing.T) {
 
 func TestRegistryRemoveLeavesNothingBehind(t *testing.T) {
 	t.Parallel()
-	r := newRegistry()
+	r := newRegistry(0)
 	a := newSocketIn(r, "a", "shared", "only-a")
 	b := newSocketIn(r, "b", "shared", "only-b")
 	r.remove(a)
@@ -127,7 +127,7 @@ func TestRegistryJoin(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := newRegistry()
+			r := newRegistry(0)
 			r.add(&Socket{id: "s1"})
 			r.join(tc.id, tc.rooms)
 			if got := r.of(tc.id); !slices.Equal(got, tc.want) {
@@ -145,7 +145,7 @@ func TestRegistryJoin(t *testing.T) {
 
 func TestRegistryJoinIsIdempotent(t *testing.T) {
 	t.Parallel()
-	r := newRegistry()
+	r := newRegistry(0)
 	newSocketIn(r, "s1", "a")
 	r.join("s1", []string{"a"})
 	r.join("s1", []string{"a"})
@@ -178,7 +178,7 @@ func TestRegistryLeave(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := newRegistry()
+			r := newRegistry(0)
 			newSocketIn(r, "s1", "a", "b")
 			newSocketIn(r, "s2", "c")
 			r.leave(tc.id, tc.rooms)
@@ -194,7 +194,7 @@ func TestRegistryLeave(t *testing.T) {
 
 func TestRegistryLeaveDeletesEmptyRoomsOnly(t *testing.T) {
 	t.Parallel()
-	r := newRegistry()
+	r := newRegistry(0)
 	newSocketIn(r, "s1", "shared", "alone")
 	newSocketIn(r, "s2", "shared")
 	before := roomCount(r)
@@ -209,7 +209,7 @@ func TestRegistryLeaveDeletesEmptyRoomsOnly(t *testing.T) {
 
 func TestRegistryOf(t *testing.T) {
 	t.Parallel()
-	r := newRegistry()
+	r := newRegistry(0)
 	newSocketIn(r, "s1", "zeta", "alpha", "mid", "Alpha")
 	if got, want := r.of("s1"), []string{"Alpha", "alpha", "mid", "s1", "zeta"}; !slices.Equal(got, want) {
 		t.Errorf("rooms = %q, want %q", got, want)
@@ -257,7 +257,7 @@ func TestRegistryMatch(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := newRegistry()
+			r := newRegistry(0)
 			newSocketIn(r, "a", "red")
 			newSocketIn(r, "b", "red", "blue")
 			newSocketIn(r, "c", "blue")
@@ -271,7 +271,7 @@ func TestRegistryMatch(t *testing.T) {
 
 func TestRegistryMatchOnAnEmptyRegistry(t *testing.T) {
 	t.Parallel()
-	r := newRegistry()
+	r := newRegistry(0)
 	for _, rooms := range [][]string{nil, {"a"}, {"a", "b"}} {
 		if got := r.match(rooms, []string{"c"}); len(got) != 0 {
 			t.Errorf("match(%q) = %v on an empty registry", rooms, socketIDs(got))
@@ -281,7 +281,7 @@ func TestRegistryMatchOnAnEmptyRegistry(t *testing.T) {
 
 func TestRegistryMatchDoesNotChangeTheRegistry(t *testing.T) {
 	t.Parallel()
-	r := newRegistry()
+	r := newRegistry(0)
 	newSocketIn(r, "a", "red")
 	newSocketIn(r, "b", "red", "blue")
 	for _, call := range []struct{ rooms, except []string }{
@@ -306,7 +306,7 @@ func TestRegistryMatchDoesNotChangeTheRegistry(t *testing.T) {
 func TestRegistryConcurrentUse(t *testing.T) {
 	t.Parallel()
 	const workers, rounds = 8, 60
-	r := newRegistry()
+	r := newRegistry(0)
 	var wg sync.WaitGroup
 	for w := range workers {
 		wg.Add(1)

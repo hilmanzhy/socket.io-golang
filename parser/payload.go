@@ -2,9 +2,12 @@ package parser
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // ErrReservedEvent reports an event name the protocol keeps for itself.
@@ -53,11 +56,13 @@ func NewAck(namespace string, id uint64, args []any) (*Packet, error) {
 func newPayloadPacket(kind Type, namespace string, head []byte, args []any) (*Packet, error) {
 	data := append([]byte{'['}, head...)
 	var attachments [][]byte
+	var placeholders []int
 	for i, arg := range args {
 		if len(data) > 1 {
 			data = append(data, ',')
 		}
 		if blob, ok := arg.([]byte); ok {
+			placeholders = append(placeholders, len(data))
 			data = fmt.Appendf(data, `{"_placeholder":true,"num":%d}`, len(attachments))
 			attachments = append(attachments, blob)
 			continue
@@ -71,7 +76,13 @@ func newPayloadPacket(kind Type, namespace string, head []byte, args []any) (*Pa
 	if len(attachments) > 0 {
 		kind += BinaryEvent - Event
 	}
-	return &Packet{Type: kind, Namespace: namespace, Data: append(data, ']'), Attachments: attachments}, nil
+	return &Packet{
+		Type:         kind,
+		Namespace:    namespace,
+		Data:         append(data, ']'),
+		Attachments:  attachments,
+		Placeholders: placeholders,
+	}, nil
 }
 
 // ParseEvent splits an EVENT or BINARY_EVENT packet into its name and
@@ -106,20 +117,23 @@ func parseArgs(p *Packet) (Args, error) {
 		return args, nil
 	}
 	set := attachmentSet{blobs: p.Attachments, taken: make([]bool, len(p.Attachments))}
-	args.blobs = make([][]byte, len(values))
 	for i, value := range values {
 		if !bytes.Contains(value, placeholderKey) {
 			continue
 		}
-		if index, ok := placeholderIndex(value); ok {
-			blob, err := set.take(index)
+		found := placeholders(value)
+		if len(found) == 1 && found[0].end-found[0].start == len(value) {
+			blob, err := set.take(found[0].num)
 			if err != nil {
 				return Args{}, err
+			}
+			if args.blobs == nil {
+				args.blobs = make([][]byte, len(values))
 			}
 			args.values[i], args.blobs[i] = nil, blob
 			continue
 		}
-		inlined, err := set.inline(value)
+		inlined, err := set.inline(value, found)
 		if err != nil {
 			return Args{}, err
 		}
@@ -128,15 +142,100 @@ func parseArgs(p *Packet) (Args, error) {
 	return args, nil
 }
 
-func placeholderIndex(value []byte) (int64, bool) {
-	var ref struct {
-		Placeholder bool   `json:"_placeholder"`
-		Num         *int64 `json:"num"`
+// placeholder locates an object that stands for an attachment inside a JSON
+// argument: the object is the bytes from start to end, and num is the text of
+// its num member, nil when the object has none or when it is not a number.
+type placeholder struct {
+	start, end int
+	num        []byte
+}
+
+// container is an array or an object of a JSON argument that is still open:
+// where it starts, how many placeholders were found before it, and, for an
+// object, the member being read and what its _placeholder and num members
+// hold so far.
+type container struct {
+	start   int
+	found   int
+	object  bool
+	named   bool
+	member  []byte
+	flagged bool
+	num     []byte
+}
+
+// set records value as the member being read when that member is one of the
+// two that make an object a placeholder. A later member replaces an earlier
+// one of the same name, as it does when the JSON is parsed. A value that is
+// an array or an object is given as nil.
+func (c *container) set(value []byte) {
+	switch string(c.member) {
+	case `"_placeholder"`:
+		c.flagged = string(value) == "true"
+	case `"num"`:
+		c.num = nil
+		if len(value) > 0 && (value[0] == '-' || value[0] >= '0' && value[0] <= '9') {
+			c.num = value
+		}
 	}
-	if json.Unmarshal(value, &ref) != nil || !ref.Placeholder || ref.Num == nil {
-		return 0, false
+}
+
+// placeholders returns the placeholders of value, which must be valid JSON,
+// in order: its objects whose _placeholder member is true. What such an
+// object holds is not looked into, so a placeholder never lies inside
+// another one. The value is read once and never decoded into a tree: the
+// memory used does not grow with the number of values a client packs into
+// one argument.
+func placeholders(value []byte) []placeholder {
+	var found []placeholder
+	var open []container
+	for i := 0; i < len(value); i++ {
+		top := len(open) - 1
+		switch c := value[i]; c {
+		case ' ', '\t', '\n', '\r', ':':
+		case '{', '[':
+			if top >= 0 {
+				open[top].set(nil)
+			}
+			open = append(open, container{start: i, found: len(found), object: c == '{'})
+		case '}', ']':
+			if closed := open[top]; closed.flagged {
+				found = append(found[:closed.found], placeholder{closed.start, i + 1, closed.num})
+			}
+			open = open[:top]
+		case ',':
+			open[top].named = false
+		default:
+			token := scalar(value[i:])
+			i += len(token) - 1
+			switch {
+			case top < 0:
+			case open[top].object && !open[top].named:
+				open[top].member, open[top].named = token, true
+			default:
+				open[top].set(token)
+			}
+		}
 	}
-	return *ref.Num, true
+	return found
+}
+
+// scalar returns the string, number or literal that the JSON text src starts
+// with.
+func scalar(src []byte) []byte {
+	switch src[0] {
+	case '"':
+		return src[:endOfString(src, 0)+1]
+	case 't', 'n':
+		return src[:len("true")]
+	case 'f':
+		return src[:len("false")]
+	}
+	end := 1
+	for end < len(src) && strings.IndexByte("+-.eE0123456789", src[end]) >= 0 {
+		end++
+	}
+	return src[:end]
 }
 
 // attachmentSet hands the attachments of a packet to the placeholders that
@@ -148,8 +247,14 @@ type attachmentSet struct {
 	taken []bool
 }
 
-func (s *attachmentSet) take(index int64) ([]byte, error) {
-	if index < 0 || index >= int64(len(s.blobs)) {
+// take returns the attachment that num, the num member of a placeholder,
+// refers to.
+func (s *attachmentSet) take(num []byte) ([]byte, error) {
+	if num == nil {
+		return nil, malformed("invalid attachment reference")
+	}
+	index, err := strconv.ParseInt(string(num), 10, 64)
+	if err != nil || index < 0 || index >= int64(len(s.blobs)) {
 		return nil, malformed("attachment out of range")
 	}
 	if s.taken[index] {
@@ -159,57 +264,23 @@ func (s *attachmentSet) take(index int64) ([]byte, error) {
 	return s.blobs[index], nil
 }
 
-// inline replaces the placeholders nested inside a JSON argument with their
-// attachments, which encoding/json writes as base64 text.
-func (s *attachmentSet) inline(value []byte) (json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(value))
-	decoder.UseNumber()
-	var tree any
-	if err := decoder.Decode(&tree); err != nil {
-		return nil, malformed("invalid JSON argument")
-	}
-	tree, err := s.substitute(tree)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(tree)
-}
-
-func (s *attachmentSet) substitute(node any) (any, error) {
-	switch n := node.(type) {
-	case []any:
-		for i, child := range n {
-			replaced, err := s.substitute(child)
-			if err != nil {
-				return nil, err
-			}
-			n[i] = replaced
+// inline returns the argument value with each of the placeholders found in
+// it replaced by its attachment, written as the base64 text that
+// encoding/json reads into a []byte. The rest of the argument is copied as
+// the client wrote it.
+func (s *attachmentSet) inline(value []byte, found []placeholder) (json.RawMessage, error) {
+	inlined := make([]byte, 0, len(value))
+	copied := 0
+	for _, p := range found {
+		blob, err := s.take(p.num)
+		if err != nil {
+			return nil, err
 		}
-	case map[string]any:
-		if n["_placeholder"] == true {
-			return s.resolve(n["num"])
-		}
-		for key, child := range n {
-			replaced, err := s.substitute(child)
-			if err != nil {
-				return nil, err
-			}
-			n[key] = replaced
-		}
+		inlined = append(append(inlined, value[copied:p.start]...), '"')
+		inlined = append(base64.StdEncoding.AppendEncode(inlined, blob), '"')
+		copied = p.end
 	}
-	return node, nil
-}
-
-func (s *attachmentSet) resolve(num any) ([]byte, error) {
-	number, ok := num.(json.Number)
-	if !ok {
-		return nil, malformed("invalid attachment reference")
-	}
-	index, err := number.Int64()
-	if err != nil {
-		return nil, malformed("attachment out of range")
-	}
-	return s.take(index)
+	return append(inlined, value[copied:]...), nil
 }
 
 // Args are the positional arguments of an event or of an acknowledgement.
@@ -273,7 +344,7 @@ func (a Args) Bind(targets ...any) error {
 
 func (a Args) from(start int) Args {
 	rest := Args{values: a.values[start:]}
-	if a.blobs != nil {
+	if start < len(a.blobs) {
 		rest.blobs = a.blobs[start:]
 	}
 	return rest

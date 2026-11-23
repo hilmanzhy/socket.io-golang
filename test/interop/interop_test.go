@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 // reasons counts the disconnect reasons the server reported.
@@ -141,7 +141,7 @@ func TestJavaScriptClient(t *testing.T) {
 		t.Skip("node is not installed")
 	}
 	if _, err := os.Stat("node_modules/socket.io-client"); err != nil {
-		t.Skip("run npm install in test/interop first")
+		t.Skip("run npm ci in test/interop first")
 	}
 
 	for _, transports := range []string{"polling", "websocket", "polling,websocket"} {

@@ -30,7 +30,7 @@ func (s *Server) upgrade(w http.ResponseWriter, r *http.Request, session *Sessio
 		conn.Close()
 		return
 	}
-	session.serveWebSocket(conn)
+	session.serveWebSocket(conn, base64Requested(r))
 }
 
 func (s *Session) beginUpgrade() bool {
@@ -45,14 +45,30 @@ func (s *Session) beginUpgrade() bool {
 
 func (s *Session) cancelUpgrade() {
 	s.mu.Lock()
-	s.upgrading, s.flushing = false, false
+	s.upgrading, s.flushing, s.conn = false, false, nil
 	s.mu.Unlock()
+}
+
+// track makes conn the connection that end closes, so a session that ends
+// during the probe does not leave it open until UpgradeTimeout. It reports
+// false when the session has ended already.
+func (s *Session) track(conn *websocket.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == stateClosed {
+		return false
+	}
+	s.conn = conn
+	return true
 }
 
 // probe runs the upgrade handshake: the client pings over the new
 // connection, the server answers and releases the pending poll, then the
 // client confirms.
 func (s *Session) probe(conn *websocket.Conn) error {
+	if !s.track(conn) {
+		return ErrClosed
+	}
 	conn.SetReadLimit(s.server.opts.MaxPayload)
 	deadline := time.Now().Add(s.server.opts.UpgradeTimeout)
 	conn.SetReadDeadline(deadline)
@@ -84,15 +100,24 @@ func expectText(conn *websocket.Conn, want string) error {
 	return nil
 }
 
+// base64Requested reports whether the b64 query parameter asks for binary
+// packets as text frames. Like the reference, it takes the last value of the
+// parameter and counts any value that is not empty.
+func base64Requested(r *http.Request) bool {
+	values := r.URL.Query()["b64"]
+	return len(values) > 0 && values[len(values)-1] != ""
+}
+
 // serveWebSocket makes conn the transport of the session and reads from it
-// until the session ends.
-func (s *Session) serveWebSocket(conn *websocket.Conn) {
+// until the session ends. With binaryAsText the session sends binary packets
+// as text frames "b<base64>".
+func (s *Session) serveWebSocket(conn *websocket.Conn, binaryAsText bool) {
 	conn.SetReadLimit(s.server.opts.MaxPayload)
 	if !s.adopt(conn) {
 		conn.Close()
 		return
 	}
-	go s.writeLoop(conn)
+	go s.writeLoop(conn, binaryAsText)
 	s.readLoop(conn)
 }
 
@@ -138,7 +163,7 @@ func readFailure(err error) CloseReason {
 // writeLoop is the only writer of data frames. It swaps the queue for an
 // empty one under the lock and writes outside of it, so a slow client never
 // blocks Send.
-func (s *Session) writeLoop(conn *websocket.Conn) {
+func (s *Session) writeLoop(conn *websocket.Conn, binaryAsText bool) {
 	var spare []packet
 	for {
 		s.mu.Lock()
@@ -150,7 +175,7 @@ func (s *Session) writeLoop(conn *websocket.Conn) {
 		case state == stateClosed:
 			return
 		case len(batch) > 0:
-			if err := s.write(conn, batch); err != nil {
+			if err := s.write(conn, batch, binaryAsText); err != nil {
 				s.end(ReasonTransportError)
 				return
 			}
@@ -171,11 +196,15 @@ func (s *Session) writeLoop(conn *websocket.Conn) {
 	}
 }
 
-func (s *Session) write(conn *websocket.Conn, batch []packet) error {
+func (s *Session) write(conn *websocket.Conn, batch []packet, binaryAsText bool) error {
 	conn.SetWriteDeadline(time.Now().Add(s.server.opts.PingTimeout))
 	for _, p := range batch {
 		if p.binary {
-			if err := conn.WriteMessage(websocket.BinaryMessage, p.data); err != nil {
+			kind, data := websocket.BinaryMessage, p.data
+			if binaryAsText {
+				kind, data = websocket.TextMessage, appendPayload(nil, []packet{p})
+			}
+			if err := conn.WriteMessage(kind, data); err != nil {
 				return err
 			}
 			continue

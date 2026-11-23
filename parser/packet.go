@@ -43,15 +43,25 @@ func (t Type) carriesBinary() bool {
 	return t == BinaryEvent || t == BinaryAck
 }
 
+func (t Type) carriesArguments() bool {
+	return t == Event || t == Ack || t.carriesBinary()
+}
+
 // Packet is one Socket.IO packet. Data holds the JSON payload, in which each
 // binary value is replaced by a placeholder that refers to Attachments.
+//
+// Placeholders holds the offset in Data of the placeholder of each attachment,
+// in the order of Attachments. It tells a placeholder from an argument that
+// only looks like one. NewEvent and NewAck fill it; the Decoder leaves it nil,
+// because the placeholders of a client are found by reading Data.
 type Packet struct {
-	Type        Type            `json:"type"`
-	Namespace   string          `json:"nsp"`
-	ID          uint64          `json:"id,omitempty"`
-	HasID       bool            `json:"hasId,omitempty"`
-	Data        json.RawMessage `json:"data,omitempty"`
-	Attachments [][]byte        `json:"attachments,omitempty"`
+	Type         Type
+	Namespace    string
+	ID           uint64
+	HasID        bool
+	Data         json.RawMessage
+	Attachments  [][]byte
+	Placeholders []int
 }
 
 // Encode returns the text frame of p. The attachments follow it on the wire

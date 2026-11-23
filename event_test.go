@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	socketio "github.com/nuriontech/socket.io-golang"
-	"github.com/nuriontech/socket.io-golang/parser"
+	socketio "github.com/hilmanzhy/socket.io-golang"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 func TestEventDelivery(t *testing.T) {

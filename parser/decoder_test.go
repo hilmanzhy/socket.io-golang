@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 func TestDecodeVectors(t *testing.T) {
@@ -124,6 +124,9 @@ func TestMaxAttachments(t *testing.T) {
 		{2, 3, false},
 		{100, 100, true},
 		{100, 101, false},
+		{-1, 1, true},
+		{-1, int64(parser.DefaultMaxAttachments), true},
+		{-1, int64(parser.DefaultMaxAttachments) + 1, false},
 		{0, math.MaxInt32, false},
 		{0, math.MaxInt32 + 1, false},
 		{1000, math.MaxInt32, false},
@@ -131,7 +134,7 @@ func TestMaxAttachments(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("limit %d count %d", tc.limit, tc.count), func(t *testing.T) {
 			t.Parallel()
-			d := parser.Decoder{MaxAttachments: tc.limit}
+			d := parser.Decoder{MaxAttachments: tc.limit, MaxArguments: looseArguments}
 			if !tc.accepted {
 				p, err := d.Text([]byte(fmt.Sprintf(`5%d-["ev"]`, tc.count)))
 				if p != nil {

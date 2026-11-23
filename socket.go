@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 // Socket is the server end of one client's connection to one namespace.
@@ -91,9 +91,8 @@ func (s *Socket) Use(middleware func(*Event) error) {
 
 // OnDisconnect sets the handler that runs once when the socket leaves the
 // namespace, after the handlers of the events queued before. It replaces the
-// previous one. After Disconnect(false) on a socket whose backlog is full,
-// the one event that was waiting for a free slot is still handled, after
-// this handler.
+// previous one. No handler of the socket runs after it: an event that was
+// still waiting for room in a full backlog at that moment is dropped.
 func (s *Socket) OnDisconnect(handler func(Reason)) {
 	s.mu.Lock()
 	s.onDisconnect = handler
@@ -136,9 +135,10 @@ func (s *Socket) EmitWithAck(ctx context.Context, event string, args ...any) (Ar
 }
 
 // Join adds the socket to rooms. It has no effect on a socket that is not
-// connected.
-func (s *Socket) Join(rooms ...string) {
-	s.namespace.rooms.join(s.id, rooms)
+// connected. With Options.MaxRooms set, a call that would take the socket
+// over the limit joins none of the rooms and returns ErrRoomLimit.
+func (s *Socket) Join(rooms ...string) error {
+	return s.namespace.rooms.join(s.id, rooms)
 }
 
 // Leave removes the socket from rooms.
@@ -213,7 +213,7 @@ func (s *Socket) leave(reason Reason) bool {
 		delete(s.acks, id)
 	}
 	s.mu.Unlock()
-	s.mailbox.push(func() {
+	s.mailbox.finish(func() {
 		s.mu.Lock()
 		handler := s.onDisconnect
 		s.mu.Unlock()

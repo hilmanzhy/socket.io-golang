@@ -1,9 +1,9 @@
 package socketio
 
 import (
-	"sync/atomic"
+	"sync"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 // Args are the positional arguments of an event or of an acknowledgement.
@@ -20,7 +20,8 @@ type Event struct {
 
 	ackID    uint64
 	wantsAck bool
-	acked    atomic.Bool
+	mu       sync.Mutex
+	acked    bool
 }
 
 // Bind decodes the arguments into targets, in order. See Args.Bind.
@@ -34,8 +35,10 @@ func (e *Event) WantsAck() bool {
 }
 
 // Ack answers the event. It does nothing when the client did not ask for an
-// acknowledgement. Only one answer is sent: the first call whose arguments can
-// be encoded claims it, and later calls do nothing.
+// acknowledgement. Only one answer is sent: the first call that hands it over
+// for sending claims it, so a call that fails, because its arguments cannot be
+// encoded or because the socket is disconnected, leaves it to the next one, and
+// later calls do nothing.
 func (e *Event) Ack(args ...any) error {
 	if !e.wantsAck {
 		return nil
@@ -44,8 +47,14 @@ func (e *Event) Ack(args ...any) error {
 	if err != nil {
 		return err
 	}
-	if !e.acked.CompareAndSwap(false, true) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.acked {
 		return nil
 	}
-	return e.Socket.send(packet)
+	if err := e.Socket.send(packet); err != nil {
+		return err
+	}
+	e.acked = true
+	return nil
 }

@@ -34,6 +34,12 @@ func TestOptionsDefaults(t *testing.T) {
 			Options{ConnectTimeout: 45 * time.Second, MaxAttachments: 10, EventBacklog: 5},
 			slog.Default(),
 		},
+		{
+			"negative values are replaced by the defaults",
+			Options{ConnectTimeout: -time.Second, EventBacklog: -3},
+			Options{ConnectTimeout: 45 * time.Second, MaxAttachments: 10, EventBacklog: 64},
+			slog.Default(),
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -3,12 +3,16 @@ package socketio
 import (
 	"errors"
 
-	"github.com/nuriontech/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
 )
 
 // ErrDisconnected is returned when a packet is sent through a socket that is
 // not connected to its namespace.
 var ErrDisconnected = errors.New("socketio: socket is disconnected")
+
+// ErrRoomLimit is returned when joining rooms would take a socket over
+// Options.MaxRooms.
+var ErrRoomLimit = errors.New("socketio: room limit reached")
 
 // ConnectError lets a namespace middleware refuse a connection with details.
 // Message and Data are sent to the client, which receives them in its

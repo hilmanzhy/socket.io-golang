@@ -38,7 +38,9 @@ func (s *Session) poll(w http.ResponseWriter, r *http.Request) {
 	w.Write(appendPayload(nil, batch))
 }
 
-// post consumes the packets a client sends in the body of a POST.
+// post consumes the packets a client sends in the body of a POST. A body with a
+// malformed packet is refused whole: the first pass checks every packet before
+// the second one delivers any.
 func (s *Session) post(w http.ResponseWriter, r *http.Request) {
 	if !s.claim(w, &s.posting) {
 		return
@@ -55,13 +57,14 @@ func (s *Session) post(w http.ResponseWriter, r *http.Request) {
 		fail(w, status, codeBadRequest)
 		return
 	}
-	packets, err := decodePayload(body)
-	if err != nil {
-		s.end(ReasonParseError)
-		fail(w, http.StatusBadRequest, codeBadRequest)
-		return
+	for _, err := range payloadPackets(body) {
+		if err != nil {
+			s.end(ReasonParseError)
+			fail(w, http.StatusBadRequest, codeBadRequest)
+			return
+		}
 	}
-	for _, p := range packets {
+	for p := range payloadPackets(body) {
 		s.handle(p)
 	}
 	w.Header().Set("Content-Type", "text/html")
@@ -118,9 +121,11 @@ func (s *Session) nextBatch(ctx context.Context) ([]packet, bool) {
 }
 
 // takeBatch returns what a poll must answer right now, or nil when the poll
-// has to wait. The close packet of a closing session travels alone, in the
-// poll after the last messages: the JavaScript client acts on a close packet
-// before the messages that share its payload.
+// has to wait. A batch holds the first queued packets that fit in MaxPayload;
+// the rest stays queued for the next poll. The close packet of
+// a closing session travels alone, in the poll after the last messages: the
+// JavaScript client acts on a close packet before the messages that share its
+// payload.
 func (s *Session) takeBatch() []packet {
 	var batch []packet
 	last := false
@@ -131,7 +136,7 @@ func (s *Session) takeBatch() []packet {
 	case s.transport != Polling:
 		batch = []packet{{kind: kindNoop}}
 	case len(s.queue) > 0:
-		batch = s.drain(nil)
+		batch = s.takeFront(s.server.opts.MaxPayload)
 	case s.state == stateClosing:
 		batch, last = []packet{{kind: kindClose}}, true
 	case s.flushing:
@@ -142,6 +147,24 @@ func (s *Session) takeBatch() []packet {
 		s.end(ReasonForcedClose)
 	}
 	return batch
+}
+
+// fitting returns how many packets from the front of queue make one payload of
+// at most limit bytes, counting the separators. A payload holds at least one
+// packet, however large, so the result is never less than 1 for a queue that
+// is not empty.
+func fitting(queue []packet, limit int64) int {
+	size := int64(0)
+	for i, p := range queue {
+		if i > 0 {
+			size++
+		}
+		size += p.wireSize()
+		if i > 0 && size > limit {
+			return i
+		}
+	}
+	return len(queue)
 }
 
 // abandon ends a polling session whose client dropped the pending GET.

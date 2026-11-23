@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 const (
@@ -83,7 +83,10 @@ func joinLobby(socket *socketio.Socket) {
 	value, _ := socket.Get("name")
 	name, _ := value.(string)
 
-	socket.Join(room)
+	if err := socket.Join(room); err != nil {
+		socket.Disconnect(true)
+		return
+	}
 	socket.To(room).Emit("joined", name)
 
 	socket.On("message", func(event *socketio.Event) {

@@ -9,26 +9,33 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nuriontech/socket.io-golang/engineio"
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 // conn multiplexes the namespaces of one client over one Engine.IO session.
+// Its timer runs exactly while the session is open and has no socket, so a
+// connection cannot stay open for longer than ConnectTimeout without a
+// namespace, whether it never joined one or left the last one.
 type conn struct {
 	server  *Server
 	session *engineio.Session
 	decoder parser.Decoder
-	timer   *time.Timer
 
 	mu      sync.Mutex
 	sockets map[string]*Socket
+	timer   *time.Timer
+	closed  bool
 }
 
 func newConn(server *Server, session *engineio.Session) *conn {
 	c := &conn{
 		server:  server,
 		session: session,
-		decoder: parser.Decoder{MaxAttachments: server.opts.MaxAttachments},
+		decoder: parser.Decoder{
+			MaxAttachments: server.opts.MaxAttachments,
+			MaxArguments:   server.opts.MaxArguments,
+		},
 		sockets: make(map[string]*Socket),
 	}
 	c.timer = time.AfterFunc(server.opts.ConnectTimeout, c.expire)
@@ -43,14 +50,26 @@ func (c *conn) Receive(m engineio.Message) error {
 	}
 	packet, err := decode(m.Data)
 	if err != nil || packet == nil {
-		return err
+		return c.reject(err)
 	}
-	return c.route(packet)
+	return c.reject(c.route(packet))
+}
+
+// reject logs the error that is about to end the connection, if there is one,
+// and returns it.
+func (c *conn) reject(err error) error {
+	if err != nil {
+		c.server.opts.Logger.Warn("socketio: malformed packet", "error", err)
+	}
+	return err
 }
 
 // Closed disconnects every socket once the session has ended.
 func (c *conn) Closed(reason engineio.CloseReason) {
+	c.mu.Lock()
+	c.closed = true
 	c.timer.Stop()
+	c.mu.Unlock()
 	for _, socket := range c.all() {
 		socket.leave(Reason(reason))
 	}
@@ -96,8 +115,8 @@ func (c *conn) connect(p *parser.Packet) error {
 
 	c.mu.Lock()
 	c.sockets[namespace.name] = socket
-	c.mu.Unlock()
 	c.timer.Stop()
+	c.mu.Unlock()
 
 	answer := &parser.Packet{Type: parser.Connect, Namespace: namespace.name, Data: fmt.Appendf(nil, `{"sid":%q}`, socket.id)}
 	if err := c.send(answer); err != nil {
@@ -159,12 +178,18 @@ func (c *conn) all() []*Socket {
 	return slices.Collect(maps.Values(c.sockets))
 }
 
+// forget drops a socket and restarts the timer when it was the last one of
+// an open session.
 func (c *conn) forget(socket *Socket) {
 	c.mu.Lock()
-	if c.sockets[socket.namespace.name] == socket {
-		delete(c.sockets, socket.namespace.name)
+	defer c.mu.Unlock()
+	if c.sockets[socket.namespace.name] != socket {
+		return
 	}
-	c.mu.Unlock()
+	delete(c.sockets, socket.namespace.name)
+	if len(c.sockets) == 0 && !c.closed {
+		c.timer.Reset(c.server.opts.ConnectTimeout)
+	}
 }
 
 // frames returns the wire form of a packet: its text frame followed by one

@@ -2,10 +2,12 @@ package parser_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 func TestArgsLen(t *testing.T) {
@@ -169,5 +171,114 @@ func TestArgsNullIsNotBinary(t *testing.T) {
 	got := any("unset")
 	if err := args.Bind(&got); err != nil || got != nil {
 		t.Fatalf("Bind = %v, %v", got, err)
+	}
+}
+
+func TestArgsPlaceholderPositions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		wire        string
+		attachments [][]byte
+		length      int
+		binary      map[int][]byte
+	}{
+		{"attachments without placeholders", `52-["ev","a",1]`, blobs(2), 2, nil},
+		{"only nested placeholders", `52-["ev",{"a":` + ph0 + `},[` + ph1 + `]]`, blobs(2), 2, nil},
+		{"nested placeholder after plain arguments", `51-["ev",1,"x",{"a":[` + ph0 + `]}]`, blobs(1), 3, nil},
+		{"several placeholders in one nested argument", `52-["ev",{"a":` + ph1 + `,"b":[` + ph0 + `]}]`, blobs(2), 1, nil},
+		{"top level placeholder first", `51-["ev",` + ph0 + `,1]`, blobs(1), 2, map[int][]byte{0: {0, 1}}},
+		{"top level placeholder last", `51-["ev",1,2,3,` + ph0 + `]`, blobs(1), 4, map[int][]byte{3: {0, 1}}},
+		{"top level placeholders only", `52-["ev",` + ph1 + `,` + ph0 + `]`, blobs(2), 2, map[int][]byte{0: {1, 2}, 1: {0, 1}}},
+		{
+			"top level and nested placeholders",
+			`53-["ev",` + ph2 + `,{"a":` + ph0 + `},` + ph1 + `,5]`, blobs(3), 4,
+			map[int][]byte{0: {2, 3}, 2: {1, 2}},
+		},
+		{
+			"nested placeholder before the first top level one",
+			`52-["ev",{"a":` + ph0 + `},` + ph1 + `]`, blobs(2), 2,
+			map[int][]byte{1: {1, 2}},
+		},
+		{"no attachments", `2["ev","a",{"x":1}]`, nil, 2, nil},
+		{"no attachments and no arguments", `2["ev"]`, nil, 0, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, args := mustEvent(t, tc.wire, tc.attachments...)
+			if args.Len() != tc.length {
+				t.Fatalf("Len() = %d, want %d", args.Len(), tc.length)
+			}
+			for i := range args.Len() {
+				want, binary := tc.binary[i]
+				if args.IsBinary(i) != binary {
+					t.Errorf("IsBinary(%d) = %t, want %t", i, args.IsBinary(i), binary)
+				}
+				if got := args.Bytes(i); !bytes.Equal(got, want) || binary != (got != nil) {
+					t.Errorf("Bytes(%d) = %v, want %v", i, got, want)
+				}
+				raw := args.Raw(i)
+				if binary != (raw == nil) || strings.Contains(string(raw), "_placeholder") {
+					t.Errorf("Raw(%d) = %q for binary=%t", i, raw, binary)
+				}
+			}
+			for _, i := range []int{-1, args.Len(), args.Len() + 1, math.MaxInt} {
+				if args.IsBinary(i) || args.Bytes(i) != nil || args.Raw(i) != nil {
+					t.Errorf("argument %d is out of range but returned data", i)
+				}
+			}
+			targets := make([]any, args.Len()+1)
+			for i := range targets {
+				targets[i] = new(any)
+			}
+			if err := args.Bind(targets...); err != nil {
+				t.Fatalf("Bind: %v", err)
+			}
+			for i, want := range tc.binary {
+				if got, _ := (*targets[i].(*any)).([]byte); !bytes.Equal(got, want) {
+					t.Errorf("Bind put %v in argument %d, want %v", *targets[i].(*any), i, want)
+				}
+			}
+		})
+	}
+}
+
+func TestArgsNestedPlaceholderLeavesTheRestOfTheArgumentAsWritten(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		json string
+		want string
+	}{
+		{
+			"object",
+			`{"html":"<b>fish & chips</b>","id":9007199254740993,"data":` + ph0 + `}`,
+			`{"html":"<b>fish & chips</b>","id":9007199254740993,"data":"AQID"}`,
+		},
+		{"array of strings", `["<",">","&",` + ph0 + `]`, `["<",">","&","AQID"]`},
+		{
+			"numbers keep their literal form",
+			`{"n":[9007199254740993,1.0,1e2,-0,0.10,18446744073709551615],"p":` + ph0 + `}`,
+			`{"n":[9007199254740993,1.0,1e2,-0,0.10,18446744073709551615],"p":"AQID"}`,
+		},
+		{"escapes stay as written", "{\"s\":\"\x5cu003cb\x5cu003e\x5cu0026\",\"p\":" + ph0 + "}", "{\"s\":\"\x5cu003cb\x5cu003e\x5cu0026\",\"p\":\"AQID\"}"},
+		{"quotes and backslashes stay escaped", `{"s":"a\"b\\c\nd","p":` + ph0 + `}`, `{"s":"a\"b\\c\nd","p":"AQID"}`},
+		{"spaces stay as written", `{ "p" : ` + ph0 + ` , "q" : [ 1 , 2 ] }`, `{ "p" : "AQID" , "q" : [ 1 , 2 ] }`},
+		{"repeated members stay as written", `{"a":1,"a":2,"p":` + ph0 + `}`, `{"a":1,"a":2,"p":"AQID"}`},
+		{"several placeholders", `[` + ph0 + `,{"x":[1,` + ph1 + `]},` + ph2 + `]`, `["AQID",{"x":[1,"BA=="]},"BQY="]`},
+		{"nested html", `[{"a":[{"b":"</script>"}]},` + ph0 + `]`, `[{"a":[{"b":"</script>"}]},"AQID"]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, args := mustEvent(t, `53-["ev",`+tc.json+`]`, []byte{1, 2, 3}, []byte{4}, []byte{5, 6})
+			if got := string(args.Raw(0)); got != tc.want {
+				t.Fatalf("Raw(0) = %s, want %s", got, tc.want)
+			}
+			if !json.Valid(args.Raw(0)) {
+				t.Fatalf("Raw(0) = %q is not valid JSON", args.Raw(0))
+			}
+		})
 	}
 }

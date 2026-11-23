@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nuriontech/socket.io-golang/engineio"
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 // Options configures a Server. The zero value is ready to use.
@@ -18,26 +18,38 @@ type Options struct {
 	// payload limits and the origin check.
 	Engine engineio.Options
 	// ConnectTimeout is how long a connection may stay open without joining
-	// a namespace. Default 45 s.
+	// a namespace. Zero or a negative value means the default, 45 s.
 	ConnectTimeout time.Duration
 	// MaxAttachments caps the binary attachments of one received packet.
-	// Default 10.
+	// Zero or a negative value means the default, 10.
 	MaxAttachments int
+	// MaxArguments caps the arguments of one received event or
+	// acknowledgement; the event name counts as one. Zero or a negative value
+	// means the default, 64.
+	MaxArguments int
+	// MaxRooms caps the rooms one socket may be in, not counting the room
+	// named after its ID. Zero or a negative value means no limit.
+	MaxRooms int
 	// EventBacklog is how many received events one socket may have waiting
-	// for its handlers before its connection stops being read. Default 64.
+	// for its handlers before its connection stops being read. Zero or a
+	// negative value means the default, 64.
 	EventBacklog int
 	// Adapter relays broadcasts to the other servers of a cluster. Nil means
 	// a single server.
 	Adapter Adapter
-	// Logger receives the panics of handlers. Default slog.Default().
+	// Logger receives the panics of handlers, the malformed packets that end
+	// a connection and, unless Engine.Logger is set, the panics of the Engine
+	// callbacks. Default slog.Default().
 	Logger *slog.Logger
 }
 
 func (o Options) withDefaults() Options {
-	o.ConnectTimeout = cmp.Or(o.ConnectTimeout, 45*time.Second)
+	o.ConnectTimeout = cmp.Or(max(o.ConnectTimeout, 0), 45*time.Second)
 	o.MaxAttachments = cmp.Or(o.MaxAttachments, parser.DefaultMaxAttachments)
-	o.EventBacklog = cmp.Or(o.EventBacklog, 64)
+	o.MaxArguments = cmp.Or(o.MaxArguments, parser.DefaultMaxArguments)
+	o.EventBacklog = cmp.Or(max(o.EventBacklog, 0), 64)
 	o.Logger = cmp.Or(o.Logger, slog.Default())
+	o.Engine.Logger = cmp.Or(o.Engine.Logger, o.Logger)
 	return o
 }
 
@@ -74,7 +86,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Of returns the namespace called name, creating it on first use. Clients
-// can only connect to namespaces that exist.
+// can only connect to namespaces that exist. A name that contains a comma is
+// accepted, but no client can reach it, because the Socket.IO packet format
+// ends the namespace at the first comma.
 func (s *Server) Of(name string) *Namespace {
 	if !strings.HasPrefix(name, "/") {
 		name = "/" + name
@@ -83,7 +97,7 @@ func (s *Server) Of(name string) *Namespace {
 	defer s.mu.Unlock()
 	namespace, ok := s.namespaces[name]
 	if !ok {
-		namespace = &Namespace{name: name, server: s, rooms: newRegistry()}
+		namespace = &Namespace{name: name, server: s, rooms: newRegistry(s.opts.MaxRooms)}
 		s.namespaces[name] = namespace
 	}
 	return namespace

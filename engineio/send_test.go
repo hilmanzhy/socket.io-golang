@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
 )
 
 // collect reads server messages until it holds n of them and returns their

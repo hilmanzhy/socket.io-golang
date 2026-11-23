@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 func TestSocketIdentity(t *testing.T) {

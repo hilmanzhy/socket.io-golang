@@ -16,7 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	socketio "github.com/nuriontech/socket.io-golang"
+	socketio "github.com/hilmanzhy/socket.io-golang"
 )
 
 const (

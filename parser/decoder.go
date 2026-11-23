@@ -14,6 +14,9 @@ var ErrMalformed = errors.New("parser: malformed packet")
 // DefaultMaxAttachments is the attachment limit of a zero Decoder.
 const DefaultMaxAttachments = 10
 
+// DefaultMaxArguments is the limit of payload elements of a zero Decoder.
+const DefaultMaxArguments = 64
+
 func malformed(detail string) error {
 	return fmt.Errorf("%w: %s", ErrMalformed, detail)
 }
@@ -24,9 +27,15 @@ func malformed(detail string) error {
 // to the frames they were decoded from instead of copying them: a frame must
 // not be modified once it has been handed to the Decoder.
 type Decoder struct {
-	// MaxAttachments caps the binary attachments of one packet. Zero means
-	// DefaultMaxAttachments.
+	// MaxAttachments caps the binary attachments of one packet. Zero or a
+	// negative value means DefaultMaxAttachments.
 	MaxAttachments int
+
+	// MaxArguments caps the elements of the payload array of an EVENT,
+	// BINARY_EVENT, ACK or BINARY_ACK packet. The event name of an event
+	// counts as one element. Zero or a negative value means
+	// DefaultMaxArguments.
+	MaxArguments int
 
 	pending *Packet
 	missing int
@@ -42,11 +51,11 @@ func (d *Decoder) Text(frame []byte) (*Packet, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := d.checkLimits(packet, attachments); err != nil {
+		return nil, err
+	}
 	if attachments == 0 {
 		return packet, nil
-	}
-	if attachments > d.limit() {
-		return nil, malformed("too many attachments")
 	}
 	d.pending, d.missing = packet, attachments
 	return nil, nil
@@ -68,11 +77,64 @@ func (d *Decoder) Binary(frame []byte) (*Packet, error) {
 	return packet, nil
 }
 
-func (d *Decoder) limit() int {
-	if d.MaxAttachments > 0 {
-		return d.MaxAttachments
+func (d *Decoder) checkLimits(p *Packet, attachments int) error {
+	if attachments > positiveOr(d.MaxAttachments, DefaultMaxAttachments) {
+		return malformed("too many attachments")
 	}
-	return DefaultMaxAttachments
+	if p.Type.carriesArguments() && exceedsElements(p.Data, positiveOr(d.MaxArguments, DefaultMaxArguments)) {
+		return malformed("too many arguments")
+	}
+	return nil
+}
+
+func positiveOr(n, fallback int) int {
+	if n > 0 {
+		return n
+	}
+	return fallback
+}
+
+// exceedsElements reports whether the JSON array at the start of data holds
+// more than limit elements. It counts the commas that separate the elements
+// of the outermost array, so it needs no extra memory and stops at the comma
+// that proves the excess. It does not validate the JSON: a malformed array is
+// counted as far as its brackets and strings allow, and left to the later
+// parse to reject. The limit must be positive.
+func exceedsElements(data []byte, limit int) bool {
+	depth, commas := 0, 0
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case '"':
+			i = endOfString(data, i)
+		case '[', '{':
+			depth++
+		case ']', '}':
+			depth--
+			if depth == 0 {
+				return false
+			}
+		case ',':
+			if depth != 1 {
+				continue
+			}
+			if commas++; commas >= limit {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func endOfString(data []byte, open int) int {
+	for i := open + 1; i < len(data); i++ {
+		switch data[i] {
+		case '\\':
+			i++
+		case '"':
+			return i
+		}
+	}
+	return len(data)
 }
 
 func decodeText(frame []byte) (*Packet, int, error) {

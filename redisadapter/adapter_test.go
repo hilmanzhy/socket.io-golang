@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,10 +16,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 
-	socketio "github.com/nuriontech/socket.io-golang"
-	"github.com/nuriontech/socket.io-golang/engineio"
-	"github.com/nuriontech/socket.io-golang/parser"
-	"github.com/nuriontech/socket.io-golang/redisadapter"
+	socketio "github.com/hilmanzhy/socket.io-golang"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/redisadapter"
 )
 
 const patience = 5 * time.Second
@@ -70,6 +71,18 @@ func subscribe(adapter *redisadapter.Adapter) <-chan socketio.Operation {
 	return received
 }
 
+// drain empties received once it has been quiet for a moment: publishUntil
+// may have published the same operation more than once.
+func drain(received <-chan socketio.Operation) {
+	for {
+		select {
+		case <-received:
+		case <-time.After(100 * time.Millisecond):
+			return
+		}
+	}
+}
+
 func newEmit(t *testing.T, event string) socketio.Operation {
 	t.Helper()
 	packet, err := parser.NewEvent("/", event, []any{"payload", []byte{1, 2, 3}})
@@ -100,10 +113,10 @@ func publishUntil(t *testing.T, adapter *redisadapter.Adapter, op socketio.Opera
 
 func TestPublishReachesTheOtherNodesOnly(t *testing.T) {
 	client := redisClient(t)
-	channel := "test-" + rand.Text()
-	sender := newAdapter(t, client, redisadapter.Options{Channel: channel})
-	receiver := newAdapter(t, client, redisadapter.Options{Channel: channel})
-	stranger := newAdapter(t, client, redisadapter.Options{Channel: channel + "-other"})
+	key := "test-" + rand.Text()
+	sender := newAdapter(t, client, redisadapter.Options{Key: key})
+	receiver := newAdapter(t, client, redisadapter.Options{Key: key})
+	stranger := newAdapter(t, client, redisadapter.Options{Key: key + "-other"})
 	own, others, strangers := subscribe(sender), subscribe(receiver), subscribe(stranger)
 
 	sent := newEmit(t, "news")
@@ -125,41 +138,100 @@ func TestPublishReachesTheOtherNodesOnly(t *testing.T) {
 	case op := <-own:
 		t.Errorf("the sender received its own operation: %+v", op)
 	case op := <-strangers:
-		t.Errorf("another channel received the operation: %+v", op)
+		t.Errorf("another key received the operation: %+v", op)
 	default:
 	}
 }
 
 func TestUnreadableMessageIsReportedAndSkipped(t *testing.T) {
 	client := redisClient(t)
-	channel := "test-" + rand.Text()
+	key := "test-" + rand.Text()
 	failures := make(chan error, 64)
-	sender := newAdapter(t, client, redisadapter.Options{Channel: channel})
+	sender := newAdapter(t, client, redisadapter.Options{Key: key})
 	receiver := newAdapter(t, client, redisadapter.Options{
-		Channel: channel,
+		Key:     key,
 		OnError: func(err error) { failures <- err },
 	})
 	received := subscribe(receiver)
 
 	publishUntil(t, sender, newEmit(t, "first"), received)
-	if err := client.Publish(t.Context(), channel, "not json").Err(); err != nil {
+	for _, channel := range []string{key + "#/#", key + "-request#/#"} {
+		if err := client.Publish(t.Context(), channel, "{not a message").Err(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-failures:
+		case <-time.After(patience):
+			t.Fatalf("OnError was not called for an unreadable message on %s", channel)
+		}
+	}
+	publishUntil(t, sender, newEmit(t, "second"), received)
+}
+
+func TestRequestsReachTheOtherNodes(t *testing.T) {
+	client := redisClient(t)
+	key := "test-" + rand.Text()
+	sender := newAdapter(t, client, redisadapter.Options{Key: key})
+	receiver := newAdapter(t, client, redisadapter.Options{Key: key})
+	received := subscribe(receiver)
+
+	for _, sent := range []socketio.Operation{
+		{Kind: socketio.OpJoin, Namespace: "/", Rooms: []string{"blue"}, Except: []string{"red"}, Targets: []string{"green", "gold"}},
+		{Kind: socketio.OpLeave, Namespace: "/admin", Rooms: []string{"blue"}, Targets: []string{"green"}},
+		{Kind: socketio.OpDisconnect, Namespace: "/", Rooms: []string{"blue"}, Close: true},
+	} {
+		got := publishUntil(t, sender, sent, received)
+		same := got.Kind == sent.Kind && got.Namespace == sent.Namespace && got.Close == sent.Close && got.Packet == nil &&
+			slices.Equal(got.Rooms, sent.Rooms) && slices.Equal(got.Except, sent.Except) && slices.Equal(got.Targets, sent.Targets)
+		if !same {
+			t.Errorf("got %+v, want %+v", got, sent)
+		}
+		drain(received)
+	}
+}
+
+func TestPanicOnAReceivedMessageIsReportedAndSkipped(t *testing.T) {
+	client := redisClient(t)
+	key := "test-" + rand.Text()
+	failures := make(chan error, 64)
+	sender := newAdapter(t, client, redisadapter.Options{Key: key})
+	receiver := newAdapter(t, client, redisadapter.Options{
+		Key: key,
+		OnError: func(err error) {
+			failures <- err
+			panic("OnError panicked")
+		},
+	})
+	received := make(chan socketio.Operation, 64)
+	receiver.Subscribe(func(op socketio.Operation) {
+		if op.Kind == socketio.OpLeave {
+			panic("apply panicked")
+		}
+		received <- op
+	})
+
+	publishUntil(t, sender, newEmit(t, "first"), received)
+	if err := sender.Publish(socketio.Operation{Kind: socketio.OpLeave, Namespace: "/", Targets: []string{"blue"}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case <-failures:
+	case err := <-failures:
+		if !strings.Contains(err.Error(), "apply panicked") {
+			t.Fatalf("got %v, want the panic value", err)
+		}
 	case <-time.After(patience):
-		t.Fatal("OnError was not called for an unreadable message")
+		t.Fatal("OnError was not called for a panic")
 	}
 	publishUntil(t, sender, newEmit(t, "second"), received)
 }
 
 func TestClusterBroadcastOverRedis(t *testing.T) {
 	client := redisClient(t)
-	channel := "test-" + rand.Text()
+	key := "test-" + rand.Text()
 	newServer := func() *socketio.Server {
 		server := socketio.New(socketio.Options{
 			Engine:  engineio.Options{PingInterval: time.Hour},
-			Adapter: redisadapter.New(client, redisadapter.Options{Channel: channel}),
+			Adapter: redisadapter.New(client, redisadapter.Options{Key: key}),
 		})
 		t.Cleanup(func() { server.Close() })
 		return server

@@ -1,9 +1,10 @@
 package socketio
 
 import (
+	"errors"
 	"slices"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 // BroadcastOperator addresses a set of sockets of one namespace: the ones in
@@ -47,7 +48,9 @@ func (b BroadcastOperator) Emit(event string, args ...any) error {
 	return b.run(Operation{Kind: OpEmit, Packet: packet})
 }
 
-// Join adds the matching sockets to rooms.
+// Join adds the matching sockets to rooms. A socket that would go over
+// Options.MaxRooms is skipped: on this server that makes the error wrap
+// ErrRoomLimit, on the other servers it is logged.
 func (b BroadcastOperator) Join(rooms ...string) error {
 	return b.run(Operation{Kind: OpJoin, Targets: rooms})
 }
@@ -68,13 +71,14 @@ func (b BroadcastOperator) Sockets() []*Socket {
 }
 
 // run applies the operation here, then publishes it to the cluster. The
-// returned error only ever concerns the publication.
+// returned error concerns the publication, or a join refused by the room
+// limit.
 func (b BroadcastOperator) run(op Operation) error {
 	op.Namespace, op.Rooms, op.Except = b.namespace.name, b.rooms, b.except
-	b.namespace.apply(op)
+	failure := b.namespace.apply(op)
 	adapter := b.namespace.server.opts.Adapter
 	if b.local || adapter == nil {
-		return nil
+		return failure
 	}
-	return adapter.Publish(op)
+	return errors.Join(failure, adapter.Publish(op))
 }

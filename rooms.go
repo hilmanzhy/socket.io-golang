@@ -9,14 +9,19 @@ import (
 // registry holds the connected sockets of one namespace and the rooms they
 // joined. A socket is connected exactly while it is in the registry.
 type registry struct {
+	limit int
+
 	mu      sync.RWMutex
 	sockets map[string]*Socket
 	members map[string]map[string]*Socket
 	joined  map[string]map[string]struct{}
 }
 
-func newRegistry() *registry {
+// newRegistry returns an empty registry. limit caps the rooms one socket may
+// join besides the room named after its id; zero means no limit.
+func newRegistry(limit int) *registry {
 	return &registry{
+		limit:   limit,
 		sockets: make(map[string]*Socket),
 		members: make(map[string]map[string]*Socket),
 		joined:  make(map[string]map[string]struct{}),
@@ -54,16 +59,42 @@ func (r *registry) has(id string) bool {
 	return connected
 }
 
-func (r *registry) join(id string, rooms []string) {
+// join puts a connected socket in rooms. If that takes the socket over the
+// limit, the rooms entered by this call are left again and ErrRoomLimit is
+// returned.
+func (r *registry) join(id string, rooms []string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	socket, connected := r.sockets[id]
 	if !connected {
-		return
+		return nil
 	}
+	joined := r.joined[id]
+	var entered []string
 	for _, room := range rooms {
+		if _, in := joined[room]; in {
+			continue
+		}
+		if r.limit > 0 && room != id && r.count(id) >= r.limit {
+			for _, undo := range entered {
+				r.exit(id, undo)
+			}
+			return ErrRoomLimit
+		}
 		r.enter(socket, room)
+		entered = append(entered, room)
 	}
+	return nil
+}
+
+// count returns how many rooms a socket is in besides the one named after its
+// id, which never counts toward the limit.
+func (r *registry) count(id string) int {
+	joined := r.joined[id]
+	if _, own := joined[id]; own {
+		return len(joined) - 1
+	}
+	return len(joined)
 }
 
 func (r *registry) leave(id string, rooms []string) {

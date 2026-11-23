@@ -1,4 +1,4 @@
-module github.com/nuriontech/socket.io-golang
+module github.com/hilmanzhy/socket.io-golang
 
 go 1.24
 

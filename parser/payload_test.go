@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"slices"
 	"testing"
 
-	"github.com/nuriontech/socket.io-golang/parser"
+	"github.com/hilmanzhy/socket.io-golang/parser"
 )
 
 type counter struct {
@@ -184,6 +185,73 @@ func TestNewAck(t *testing.T) {
 				t.Fatalf("attachments = %q, want %q", p.Attachments, tc.wantBlobs)
 			}
 		})
+	}
+}
+
+func TestNewPacketsRecordThePlaceholderOfEveryAttachment(t *testing.T) {
+	t.Parallel()
+	look := map[string]any{"_placeholder": true, "num": 0}
+	tests := []struct {
+		name string
+		args []any
+		want []int
+	}{
+		{"no arguments", nil, nil},
+		{"no binary argument", []any{"a", 1}, nil},
+		{"an argument that looks like a placeholder", []any{look}, nil},
+		{"raw json that looks like a placeholder", []any{json.RawMessage(ph0)}, nil},
+		{"one binary argument", []any{[]byte{1}}, []int{0}},
+		{"binary after json", []any{"a", []byte{1}}, []int{4}},
+		{"several binary arguments", []any{[]byte{1}, "mid", []byte{2}, []byte{3}}, []int{0, len(ph0) + 7, len(ph0) + len(ph1) + 8}},
+		{"a look-alike before the binary argument", []any{look, []byte{1}}, []int{len(ph0) + 1}},
+		{"a look-alike on both sides of the binary argument", []any{look, []byte{1}, look}, []int{len(ph0) + 1}},
+		{"the look-alike of the next placeholder", []any{[]byte{1}, json.RawMessage(ph1), []byte{2}}, []int{0, len(ph0) + len(ph1) + 2}},
+	}
+	for _, tc := range tests {
+		event, err := parser.NewEvent("/", "e", tc.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ack, err := parser.NewAck("/", 7, tc.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, built := range []struct {
+			name   string
+			packet *parser.Packet
+			start  int
+		}{
+			{"event", event, len(`["e",`)},
+			{"ack", ack, len(`[`)},
+		} {
+			t.Run(tc.name+", "+built.name, func(t *testing.T) {
+				t.Parallel()
+				p := built.packet
+				if len(p.Placeholders) != len(p.Attachments) || len(p.Placeholders) != len(tc.want) {
+					t.Fatalf("%d offsets for %d attachments, want %d of each", len(p.Placeholders), len(p.Attachments), len(tc.want))
+				}
+				for number, offset := range p.Placeholders {
+					if offset != built.start+tc.want[number] {
+						t.Errorf("offset of the attachment %d = %d, want %d", number, offset, built.start+tc.want[number])
+					}
+					text := fmt.Sprintf(`{"_placeholder":true,"num":%d}`, number)
+					if !bytes.HasPrefix(p.Data[offset:], []byte(text)) {
+						t.Errorf("data at the offset %d = %s, want it to start with %s", offset, p.Data[offset:], text)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestDecoderRecordsNoPlaceholder(t *testing.T) {
+	t.Parallel()
+	built, err := parser.NewEvent("/", "e", []any{[]byte{1}, "a", []byte{2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded := mustDecode(t, string(built.Encode()), built.Attachments...); decoded.Placeholders != nil {
+		t.Fatalf("offsets of a decoded packet = %v, want none", decoded.Placeholders)
 	}
 }
 

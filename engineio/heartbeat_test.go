@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuriontech/socket.io-golang/engineio"
+	"github.com/hilmanzhy/socket.io-golang/engineio"
 )
 
 func TestHeartbeatPolling(t *testing.T) {
